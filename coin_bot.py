@@ -1,8 +1,8 @@
 """
 ==================================================
-  코인이형 텔레그램 봇 (보안 안전 버전)
-  - 메인채널: RSS 뉴스 자동 포스팅
-  - 소통방:   AI(GPT) 가 코인이형으로 모든 대화에 참여
+  코인이형 텔레그램 봇 (최고급 버전)
+  - 메인채널: 사진 + AI 한줄 요약 + 링크 자동 포스팅
+  - 소통방:   코인이형 AI 답변
   - API 키는 Railway 환경변수에서 불러옴 (안전!)
 ==================================================
 """
@@ -13,8 +13,9 @@ import logging
 import feedparser
 import hashlib
 import json
+import httpx
 from openai import AsyncOpenAI
-from telegram import Update, Bot
+from telegram import Update, Bot, InputMediaPhoto
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -25,7 +26,6 @@ from telegram.constants import ChatAction
 
 # ──────────────────────────────────────────────
 #  🔒 API 키는 Railway 환경변수에서 자동으로 불러와요
-#     여기는 절대 건드리지 마세요!
 # ──────────────────────────────────────────────
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -34,7 +34,7 @@ NEWS_CHANNEL_ID    = os.environ.get("NEWS_CHANNEL_ID")
 GROUP_CHAT_ID      = os.environ.get("GROUP_CHAT_ID")
 
 # ──────────────────────────────────────────────
-#  뉴스 RSS 주소 (원하는 것 추가/삭제 가능)
+#  뉴스 RSS 주소
 # ──────────────────────────────────────────────
 
 RSS_FEEDS = [
@@ -44,7 +44,7 @@ RSS_FEEDS = [
     "https://news.google.com/rss/search?q=주식+코스피&hl=ko&gl=KR&ceid=KR:ko",
 ]
 
-NEWS_INTERVAL_MINUTES = 60  # 뉴스 발송 주기 (분)
+NEWS_INTERVAL_MINUTES = 60
 
 # ──────────────────────────────────────────────
 #  코인이형 성격 설정
@@ -66,18 +66,24 @@ PERSONA_PROMPT = """
 - 이모지는 적당히 (문장당 0~1개)
 - 투자 권유는 절대 하지 않음 (항상 "투자 판단은 본인이!" 강조)
 - 모르는 건 "나도 잘 모르겠다 ㅋㅋ" 하고 솔직하게 말함
+- 문장 끝에 마침표(.) 절대 사용 금지 — 카톡 문자 스타일로 자연스럽게
+- 문장을 너무 완벽하게 쓰지 않기, 띄어쓰기도 약간 편하게
+- 예) "지금 BTC 좀 위험해 보이긴 해ㅋㅋ 단기는 조심하는게 나을 듯" (마침표 없음!)
 
 [대화 예시]
 회원: 비트코인 지금 사도 돼?
 코인이형: 지금 BTC RSI가 71이거든~ 단기 과매수 구간이라 조정 나올 수 있어. 근데 장기로 보면 또 얘기가 달라지지 ㅎㅎ 어떤 목적으로 사려고?
 
-회원: 이더리움 전망 어때요?
-코인이형: 요즘 ETH는 ETF 이슈랑 온체인 데이터 보면 고래들이 조용히 쌓는 중이야 🐋 개인적으론 긍정적으로 보는데, 이건 내 생각이고 투자는 항상 본인이 판단해야 해!
-
 [중요]
 - 절대 "AI입니다" 또는 "챗봇입니다" 라고 밝히지 않음
 - 질문이 코인/주식과 무관해도 자연스럽게 대화에 참여
 - 짧고 자연스럽게 (너무 긴 답변 금지, 3~5줄 이내)
+"""
+
+NEWS_SUMMARY_PROMPT = """
+아래 뉴스 제목을 보고 핵심을 한 줄(30자 이내)로 요약해줘.
+딱딱하지 않게, 코인/주식 투자자가 관심가질 만한 포인트 위주로.
+이모지 1개 포함. 예) 📉 美 금리 동결 가능성↑, 비트코인 상승 기대감
 """
 
 # ──────────────────────────────────────────────
@@ -108,7 +114,45 @@ def save_sent_news(sent: set):
 def make_news_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
+def extract_image_from_entry(entry) -> str:
+    """RSS 항목에서 이미지 URL 추출"""
+    # media:content 태그
+    if hasattr(entry, 'media_content') and entry.media_content:
+        for m in entry.media_content:
+            if m.get('type', '').startswith('image'):
+                return m.get('url', '')
+
+    # media:thumbnail 태그
+    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+        return entry.media_thumbnail[0].get('url', '')
+
+    # enclosure 태그
+    if hasattr(entry, 'enclosures') and entry.enclosures:
+        for enc in entry.enclosures:
+            if enc.get('type', '').startswith('image'):
+                return enc.get('href', '')
+
+    return ''
+
+async def get_ai_summary(title: str) -> str:
+    """GPT로 뉴스 한줄 요약"""
+    try:
+        response = await get_openai_client().chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": NEWS_SUMMARY_PROMPT},
+                {"role": "user", "content": title},
+            ],
+            max_tokens=60,
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"요약 오류: {e}")
+        return ""
+
 async def fetch_and_post_news(bot: Bot):
+    """RSS 뉴스 수집 → 사진 + AI 한줄 요약 + 링크 포스팅"""
     sent_ids = load_sent_news()
     new_count = 0
 
@@ -120,22 +164,49 @@ async def fetch_and_post_news(bot: Bot):
                 if news_id in sent_ids:
                     continue
 
-                title  = entry.get("title", "제목 없음")
-                link   = entry.get("link", "")
-                source = feed.feed.get("title", "뉴스")
+                title   = entry.get("title", "제목 없음")
+                link    = entry.get("link", "")
+                source  = feed.feed.get("title", "뉴스")
+                image   = extract_image_from_entry(entry)
 
-                message = (
+                # AI 한줄 요약
+                summary = await get_ai_summary(title)
+
+                # 메시지 구성
+                caption = (
                     f"📰 <b>{title}</b>\n\n"
+                    f"{'💡 ' + summary + chr(10) + chr(10) if summary else ''}"
                     f"🔗 <a href='{link}'>원문 보기</a>\n"
                     f"📡 출처: {source}"
                 )
 
-                await bot.send_message(
-                    chat_id=NEWS_CHANNEL_ID,
-                    text=message,
-                    parse_mode="HTML",
-                    disable_web_page_preview=False,
-                )
+                try:
+                    if image:
+                        # 사진 + 캡션 발송
+                        await bot.send_photo(
+                            chat_id=NEWS_CHANNEL_ID,
+                            photo=image,
+                            caption=caption,
+                            parse_mode="HTML",
+                        )
+                    else:
+                        # 사진 없으면 텍스트만
+                        await bot.send_message(
+                            chat_id=NEWS_CHANNEL_ID,
+                            text=caption,
+                            parse_mode="HTML",
+                            disable_web_page_preview=False,
+                        )
+                except Exception as send_err:
+                    logger.error(f"발송 오류: {send_err}")
+                    # 사진 오류시 텍스트로 재시도
+                    await bot.send_message(
+                        chat_id=NEWS_CHANNEL_ID,
+                        text=caption,
+                        parse_mode="HTML",
+                        disable_web_page_preview=False,
+                    )
+
                 sent_ids.add(news_id)
                 new_count += 1
                 await asyncio.sleep(2)
@@ -160,7 +231,16 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id != str(GROUP_CHAT_ID):
         return
 
-    if message.from_user and message.from_user.is_bot:
+    # 봇 메시지 무시
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    # 채널에서 자동 전달된 메시지 무시
+    if message.forward_origin:
+        return
+
+    # 채널 자동 포스팅 무시 (sender_chat = 채널)
+    if message.sender_chat:
         return
 
     user_text = message.text.strip()

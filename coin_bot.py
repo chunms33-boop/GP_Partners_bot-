@@ -381,14 +381,21 @@ async def generate_strategy(price, change, closes):
                  if recent[i] > recent[i-1] and recent[i] > recent[i+1])
     wave   = f"현재 {swing}개 파동 확인, {trend}"
 
+    macd_str   = f'{macd_curr:.1f}' if macd_curr else 'N/A'
+    sig_str    = f'{sig_curr:.1f}' if sig_curr else 'N/A'
+    bb_up_str  = f'${bb_upper:,.0f}' if bb_upper else 'N/A'
+    bb_lo_str  = f'${bb_lower:,.0f}' if bb_lower else 'N/A'
+    ma7_str    = f'${ma7_curr:,.0f}' if ma7_curr else 'N/A'
+    ma25_str   = f'${ma25_curr:,.0f}' if ma25_curr else 'N/A'
+
     prompt = f"""
 실시간 BTC 기술적 분석 데이터:
 - 현재가: ${price:,.0f}
 - 24h 변동: {change:+.2f}%
 - RSI(14): {rsi_str}
-- MACD: {macd_curr:.1f if macd_curr else 'N/A'} / Signal: {sig_curr:.1f if sig_curr else 'N/A'}
-- 볼린저밴드 상단: ${bb_upper:,.0f if bb_upper else 0} / 하단: ${bb_lower:,.0f if bb_lower else 0}
-- MA7: ${ma7_curr:,.0f if ma7_curr else 0} / MA25: ${ma25_curr:,.0f if ma25_curr else 0}
+- MACD: {macd_str} / Signal: {sig_str}
+- 볼린저밴드 상단: {bb_up_str} / 하단: {bb_lo_str}
+- MA7: {ma7_str} / MA25: {ma25_str}
 - 피보나치 50%: ${fib['50%']:,.0f} / 61.8%: ${fib['61.8%']:,.0f}
 - 엘리엇 파동: {wave}
 
@@ -508,9 +515,9 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
     # 🕐 자연스러운 딜레이
-    await asyncio.sleep(random.uniform(3, 15))
+    await asyncio.sleep(random.uniform(1, 4))
 
-    # 10% 확률로 무시
+    # 5% 확률로 무시
     if random.random() < 0.10:
         return
 

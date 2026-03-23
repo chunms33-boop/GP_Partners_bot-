@@ -511,7 +511,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(random.uniform(1, 4))
 
     # 5% 확률로 무시
-    if random.random() < 0.05:
+    if random.random() < 0.10:
         return
 
     try:
@@ -570,7 +570,14 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             coins_mentioned = user_text
             await update_member_info(message.from_user.id, coins=coins_mentioned[:100])
 
-        await message.reply_text(reply_text)
+        # 50% 확률로 답글(인용) / 50% 일반 메시지
+        if random.random() < 0.5:
+            await message.reply_text(reply_text)
+        else:
+            await context.bot.send_message(
+                chat_id=message.chat_id,
+                text=reply_text
+            )
 
     except Exception as e:
         logger.error(f"AI 답변 오류: {e}")

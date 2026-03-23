@@ -90,7 +90,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+def get_openai_client():
+    return AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 SENT_NEWS_FILE = "sent_news.json"
 
@@ -172,7 +173,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await asyncio.sleep(1.5)
 
-        response = await openai_client.chat.completions.create(
+        response = await get_openai_client().chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": PERSONA_PROMPT},

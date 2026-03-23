@@ -10,8 +10,7 @@ import os
 import io
 import asyncio
 import logging
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import asyncpg
 
 logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -500,7 +499,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = message.from_user.first_name if message.from_user else "회원"
 
     # DB에 대화 저장
-    save_member(message.from_user.id, user_name, user_text)
+    await save_member(message.from_user.id, user_name, user_text)
 
     # 메모리에도 저장
     chat_history.append({
@@ -523,7 +522,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(random.uniform(1, 2))
 
         # 회원 정보 가져오기
-        member = get_member(message.from_user.id)
+        member = await get_member(message.from_user.id)
         member_info = ""
         if member:
             if member.get("coins"):
@@ -534,7 +533,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 member_info += f"\n- {user_name} 메모: {member['memo']}"
 
         # 최근 DB 대화 로그
-        recent_logs = get_recent_chat_logs(30)
+        recent_logs = await get_recent_chat_logs(30)
         db_context  = "\n".join([
             f"{r['name']}: {r['message']}" for r in recent_logs
         ])
@@ -564,12 +563,12 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "role": "assistant",
             "content": reply_text
         })
-        save_member(0, "코인이형", reply_text)
+        await save_member(0, "코인이형", reply_text)
 
         # AI가 회원 성향 자동 분석해서 저장
         if any(coin in user_text.upper() for coin in ["BTC","ETH","XRP","SOL","BNB","도지","리플","비트","이더","솔라나"]):
             coins_mentioned = user_text
-            update_member_info(message.from_user.id, coins=coins_mentioned[:100])
+            await update_member_info(message.from_user.id, coins=coins_mentioned[:100])
 
         await message.reply_text(reply_text)
 
@@ -775,129 +774,119 @@ async def morning_briefing(bot: Bot):
 #  회원 기억 DB 시스템
 # ──────────────────────────────────────────────
 
-def get_db():
-    """DB 연결"""
-    return psycopg2.connect(os.environ.get("DATABASE_URL"), sslmode="require")
+# DB 풀 (전역)
+_db_pool = None
 
-def init_db():
+async def get_db_pool():
+    global _db_pool
+    if _db_pool is None:
+        _db_pool = await asyncpg.create_pool(
+            os.environ.get("DATABASE_URL"),
+            ssl="require"
+        )
+    return _db_pool
+
+async def init_db():
     """DB 테이블 초기화"""
     try:
-        conn = get_db()
-        cur  = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS members (
-                user_id     BIGINT PRIMARY KEY,
-                name        TEXT,
-                coins       TEXT DEFAULT '',
-                style       TEXT DEFAULT '',
-                memo        TEXT DEFAULT '',
-                last_seen   TIMESTAMP DEFAULT NOW(),
-                updated_at  TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS chat_logs (
-                id          SERIAL PRIMARY KEY,
-                user_id     BIGINT,
-                name        TEXT,
-                message     TEXT,
-                created_at  TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS members (
+                    user_id     BIGINT PRIMARY KEY,
+                    name        TEXT,
+                    coins       TEXT DEFAULT '',
+                    style       TEXT DEFAULT '',
+                    memo        TEXT DEFAULT '',
+                    last_seen   TIMESTAMP DEFAULT NOW(),
+                    updated_at  TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_logs (
+                    id          SERIAL PRIMARY KEY,
+                    user_id     BIGINT,
+                    name        TEXT,
+                    message     TEXT,
+                    created_at  TIMESTAMP DEFAULT NOW()
+                )
+            """)
         logger.info("DB 초기화 완료!")
     except Exception as e:
         logger.error(f"DB 초기화 오류: {e}")
 
-def get_member(user_id: int) -> dict:
+async def get_member(user_id: int) -> dict:
     """회원 정보 가져오기"""
     try:
-        conn = get_db()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT * FROM members WHERE user_id = %s", (user_id,))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM members WHERE user_id = $1", user_id
+            )
         return dict(row) if row else {}
     except Exception as e:
         logger.error(f"회원 조회 오류: {e}")
         return {}
 
-def save_member(user_id: int, name: str, message: str):
-    """회원 정보 저장/업데이트 + 대화 로그 저장"""
+async def save_member(user_id: int, name: str, message: str):
+    """회원 정보 저장/업데이트 + 대화 로그"""
     try:
-        conn = get_db()
-        cur  = conn.cursor()
-
-        # 회원 정보 upsert
-        cur.execute("""
-            INSERT INTO members (user_id, name, last_seen)
-            VALUES (%s, %s, NOW())
-            ON CONFLICT (user_id) DO UPDATE
-            SET name = EXCLUDED.name, last_seen = NOW()
-        """, (user_id, name))
-
-        # 대화 로그 저장 (최근 50개만 유지)
-        cur.execute("""
-            INSERT INTO chat_logs (user_id, name, message)
-            VALUES (%s, %s, %s)
-        """, (user_id, name, message))
-
-        cur.execute("""
-            DELETE FROM chat_logs
-            WHERE id IN (
-                SELECT id FROM chat_logs
-                ORDER BY created_at DESC
-                OFFSET 200
-            )
-        """)
-
-        conn.commit()
-        cur.close()
-        conn.close()
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO members (user_id, name, last_seen)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (user_id) DO UPDATE
+                SET name = EXCLUDED.name, last_seen = NOW()
+            """, user_id, name)
+            await conn.execute("""
+                INSERT INTO chat_logs (user_id, name, message)
+                VALUES ($1, $2, $3)
+            """, user_id, name, message)
+            await conn.execute("""
+                DELETE FROM chat_logs
+                WHERE id IN (
+                    SELECT id FROM chat_logs
+                    ORDER BY created_at DESC
+                    OFFSET 200
+                )
+            """)
     except Exception as e:
         logger.error(f"회원 저장 오류: {e}")
 
-def update_member_info(user_id: int, coins: str = None, style: str = None, memo: str = None):
-    """회원 관심 코인/성향 업데이트"""
+async def update_member_info(user_id: int, coins: str = None):
+    """회원 관심 코인 업데이트"""
     try:
-        conn = get_db()
-        cur  = conn.cursor()
-        if coins:
-            cur.execute("UPDATE members SET coins = %s, updated_at = NOW() WHERE user_id = %s", (coins, user_id))
-        if style:
-            cur.execute("UPDATE members SET style = %s, updated_at = NOW() WHERE user_id = %s", (style, user_id))
-        if memo:
-            cur.execute("UPDATE members SET memo = %s, updated_at = NOW() WHERE user_id = %s", (memo, user_id))
-        conn.commit()
-        cur.close()
-        conn.close()
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            if coins:
+                await conn.execute(
+                    "UPDATE members SET coins = $1, updated_at = NOW() WHERE user_id = $2",
+                    coins, user_id
+                )
     except Exception as e:
         logger.error(f"회원 업데이트 오류: {e}")
 
-def get_recent_chat_logs(limit: int = 30) -> list:
+async def get_recent_chat_logs(limit: int = 30) -> list:
     """최근 대화 로그 가져오기"""
     try:
-        conn = get_db()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("""
-            SELECT name, message, created_at
-            FROM chat_logs
-            ORDER BY created_at DESC
-            LIMIT %s
-        """, (limit,))
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        return list(reversed([dict(r) for r in rows]))
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT name, message FROM (
+                    SELECT name, message, created_at
+                    FROM chat_logs
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                ) sub ORDER BY created_at ASC
+            """, limit)
+        return [dict(r) for r in rows]
     except Exception as e:
         logger.error(f"로그 조회 오류: {e}")
         return []
 
 async def post_init(application):
-    init_db()
+    await init_db()
     asyncio.create_task(strategy_scheduler(application.bot))
     asyncio.create_task(idle_talker(application.bot))
     asyncio.create_task(price_monitor(application.bot))

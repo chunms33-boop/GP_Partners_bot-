@@ -493,7 +493,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(random.uniform(3, 8))
 
     # 가끔 (30% 확률) 무시 — 사람처럼 항상 답하지 않기
-    if random.random() < 0.3:
+    if random.random() < 0.17:
         return
 
     try:

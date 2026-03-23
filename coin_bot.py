@@ -10,12 +10,8 @@
 import os
 import asyncio
 import logging
-import feedparser
-import hashlib
-import json
-import httpx
 from openai import AsyncOpenAI
-from telegram import Update, Bot, InputMediaPhoto
+from telegram import Update, Bot
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -37,14 +33,26 @@ GROUP_CHAT_ID      = os.environ.get("GROUP_CHAT_ID")
 #  뉴스 RSS 주소
 # ──────────────────────────────────────────────
 
-RSS_FEEDS = [
-    "https://feeds.feedburner.com/coindesk",
-    "https://news.google.com/rss/search?q=코인+암호화폐&hl=ko&gl=KR&ceid=KR:ko",
-    "https://news.google.com/rss/search?q=비트코인+이더리움&hl=ko&gl=KR&ceid=KR:ko",
-    "https://news.google.com/rss/search?q=주식+코스피&hl=ko&gl=KR&ceid=KR:ko",
-]
+NEWS_INTERVAL_MINUTES = 120  # 트레이딩 전략 발송 주기 (분)
 
-NEWS_INTERVAL_MINUTES = 60
+TRADING_PROMPT = """
+너는 비트코인 전문 트레이더야. 아래 형식으로 짧고 핵심적인 트레이딩 전략 포스팅을 써줘.
+
+[형식]
+📊 BTC 단기 전략 — (날짜)
+
+현재 가격대 분석 한줄
+지지선/저항선 언급
+매수/매도 타이밍 힌트 (권유 아님, 참고용)
+⚠️ 투자 판단은 본인 책임
+
+[규칙]
+- 전체 5~7줄 이내로 짧게
+- 마침표 사용 금지, 카톡 스타일
+- 너무 전문적인 용어 피하기
+- 이모지 2~3개만
+- 투자 권유 절대 금지, 참고용 명시
+"""
 
 # ──────────────────────────────────────────────
 #  코인이형 성격 설정
@@ -77,13 +85,8 @@ PERSONA_PROMPT = """
 [중요]
 - 절대 "AI입니다" 또는 "챗봇입니다" 라고 밝히지 않음
 - 질문이 코인/주식과 무관해도 자연스럽게 대화에 참여
-- 짧고 자연스럽게 (너무 긴 답변 금지, 3~5줄 이내)
-"""
-
-NEWS_SUMMARY_PROMPT = """
-아래 뉴스 제목을 보고 핵심을 한 줄(30자 이내)로 요약해줘.
-딱딱하지 않게, 코인/주식 투자자가 관심가질 만한 포인트 위주로.
-이모지 1개 포함. 예) 📉 美 금리 동결 가능성↑, 비트코인 상승 기대감
+- 무조건 짧게! 1~2줄 이내로 끝내기. 길게 쓰면 안됨
+- 핵심만 딱 말하고 끊기. 설명 길게 하지 않기
 """
 
 # ──────────────────────────────────────────────
@@ -99,127 +102,36 @@ logger = logging.getLogger(__name__)
 def get_openai_client():
     return AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-SENT_NEWS_FILE = "sent_news.json"
-
-def load_sent_news():
-    if os.path.exists(SENT_NEWS_FILE):
-        with open(SENT_NEWS_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
-
-def save_sent_news(sent: set):
-    with open(SENT_NEWS_FILE, "w") as f:
-        json.dump(list(sent), f)
-
-def make_news_id(url: str) -> str:
-    return hashlib.md5(url.encode()).hexdigest()
-
-def extract_image_from_entry(entry) -> str:
-    """RSS 항목에서 이미지 URL 추출"""
-    # media:content 태그
-    if hasattr(entry, 'media_content') and entry.media_content:
-        for m in entry.media_content:
-            if m.get('type', '').startswith('image'):
-                return m.get('url', '')
-
-    # media:thumbnail 태그
-    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
-        return entry.media_thumbnail[0].get('url', '')
-
-    # enclosure 태그
-    if hasattr(entry, 'enclosures') and entry.enclosures:
-        for enc in entry.enclosures:
-            if enc.get('type', '').startswith('image'):
-                return enc.get('href', '')
-
-    return ''
-
-async def get_ai_summary(title: str) -> str:
-    """GPT로 뉴스 한줄 요약"""
+async def post_trading_strategy(bot: Bot):
+    """AI가 비트코인 트레이딩 전략을 작성해서 채널에 자동 포스팅"""
     try:
+        from datetime import datetime
+        now = datetime.now().strftime("%m/%d %H:%M")
+
         response = await get_openai_client().chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": NEWS_SUMMARY_PROMPT},
-                {"role": "user", "content": title},
+                {"role": "system", "content": TRADING_PROMPT},
+                {"role": "user", "content": f"지금 시각 {now} 기준으로 BTC 트레이딩 전략 포스팅 작성해줘"},
             ],
-            max_tokens=60,
-            temperature=0.7,
+            max_tokens=300,
+            temperature=0.8,
         )
-        return response.choices[0].message.content.strip()
+        strategy_text = response.choices[0].message.content.strip()
+
+        await bot.send_message(
+            chat_id=NEWS_CHANNEL_ID,
+            text=strategy_text,
+            parse_mode="HTML",
+        )
+        logger.info("트레이딩 전략 포스팅 완료")
+
     except Exception as e:
-        logger.error(f"요약 오류: {e}")
-        return ""
-
-async def fetch_and_post_news(bot: Bot):
-    """RSS 뉴스 수집 → 사진 + AI 한줄 요약 + 링크 포스팅"""
-    sent_ids = load_sent_news()
-    new_count = 0
-
-    for feed_url in RSS_FEEDS:
-        try:
-            feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:5]:
-                news_id = make_news_id(entry.get("link", ""))
-                if news_id in sent_ids:
-                    continue
-
-                title   = entry.get("title", "제목 없음")
-                link    = entry.get("link", "")
-                source  = feed.feed.get("title", "뉴스")
-                image   = extract_image_from_entry(entry)
-
-                # AI 한줄 요약
-                summary = await get_ai_summary(title)
-
-                # 메시지 구성
-                caption = (
-                    f"📰 <b>{title}</b>\n\n"
-                    f"{'💡 ' + summary + chr(10) + chr(10) if summary else ''}"
-                    f"🔗 <a href='{link}'>원문 보기</a>\n"
-                    f"📡 출처: {source}"
-                )
-
-                try:
-                    if image:
-                        # 사진 + 캡션 발송
-                        await bot.send_photo(
-                            chat_id=NEWS_CHANNEL_ID,
-                            photo=image,
-                            caption=caption,
-                            parse_mode="HTML",
-                        )
-                    else:
-                        # 사진 없으면 텍스트만
-                        await bot.send_message(
-                            chat_id=NEWS_CHANNEL_ID,
-                            text=caption,
-                            parse_mode="HTML",
-                            disable_web_page_preview=False,
-                        )
-                except Exception as send_err:
-                    logger.error(f"발송 오류: {send_err}")
-                    # 사진 오류시 텍스트로 재시도
-                    await bot.send_message(
-                        chat_id=NEWS_CHANNEL_ID,
-                        text=caption,
-                        parse_mode="HTML",
-                        disable_web_page_preview=False,
-                    )
-
-                sent_ids.add(news_id)
-                new_count += 1
-                await asyncio.sleep(2)
-
-        except Exception as e:
-            logger.error(f"RSS 오류 ({feed_url}): {e}")
-
-    save_sent_news(sent_ids)
-    logger.info(f"뉴스 발송 완료: {new_count}건")
+        logger.error(f"전략 포스팅 오류: {e}")
 
 async def news_scheduler(bot: Bot):
     while True:
-        await fetch_and_post_news(bot)
+        await post_trading_strategy(bot)
         await asyncio.sleep(NEWS_INTERVAL_MINUTES * 60)
 
 async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):

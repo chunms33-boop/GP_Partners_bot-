@@ -508,9 +508,9 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
     # 🕐 자연스러운 딜레이
-    await asyncio.sleep(random.uniform(1, 4))
+    await asyncio.sleep(random.uniform(3, 15))
 
-    # 5% 확률로 무시
+    # 10% 확률로 무시
     if random.random() < 0.10:
         return
 

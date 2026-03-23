@@ -499,11 +499,11 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "content": f"{user_name}: {user_text}"
     })
 
-    # 🕐 자연스러운 딜레이 (3~8초 랜덤)
-    await asyncio.sleep(random.uniform(3, 8))
+    # 🕐 자연스러운 딜레이 (3~7초 랜덤)
+    await asyncio.sleep(random.uniform(3, 7))
 
-    # 10% 확률로 무시 — 사람처럼 항상 답하지 않기
-    if random.random() < 0.10:
+    # 7% 확률로 무시 — 사람처럼 항상 답하지 않기
+    if random.random() < 0.07:
         return
 
     try:

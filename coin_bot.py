@@ -546,9 +546,177 @@ async def idle_talker(bot: Bot):
             except Exception as e:
                 logger.error(f"먼저 말 걸기 오류: {e}")
 
+
+# ──────────────────────────────────────────────
+#  BTC 가격 모니터링 — 의미있는 움직임 감지
+# ──────────────────────────────────────────────
+
+# 주요 심리적 가격대 (돌파시 알림)
+KEY_LEVELS = [60000, 65000, 70000, 75000, 80000, 85000, 90000, 95000, 100000]
+ALERT_CHANGE_PCT = 3.0   # 1시간 내 3% 이상 변동시 알림
+
+prev_price     = None
+prev_alert_time = None
+
+async def price_monitor(bot: Bot):
+    """의미있는 BTC 움직임 감지 → 채널 자동 알림"""
+    global prev_price, prev_alert_time
+
+    while True:
+        try:
+            price, change = await get_btc_price()
+            if not price:
+                await asyncio.sleep(300)
+                continue
+
+            now = datetime.now()
+            should_alert = False
+            alert_reason = ""
+
+            # 1. 주요 가격대 돌파 감지
+            if prev_price:
+                for level in KEY_LEVELS:
+                    if (prev_price < level <= price):
+                        should_alert = True
+                        alert_reason = f"📈 BTC ${level:,} 돌파"
+                        break
+                    elif (prev_price > level >= price):
+                        should_alert = True
+                        alert_reason = f"📉 BTC ${level:,} 이탈"
+                        break
+
+            # 2. 단기 급등/급락 감지 (3% 이상)
+            if not should_alert and prev_price:
+                pct = (price - prev_price) / prev_price * 100
+                if abs(pct) >= ALERT_CHANGE_PCT:
+                    direction = "급등" if pct > 0 else "급락"
+                    should_alert = True
+                    alert_reason = f"{'🚀' if pct > 0 else '🔴'} BTC {direction} ({pct:+.1f}%)"
+
+            # 너무 자주 알림 방지 (최소 30분 간격)
+            if should_alert and prev_alert_time:
+                if (now - prev_alert_time).seconds < 1800:
+                    should_alert = False
+
+            if should_alert:
+                times, opens, highs, lows, closes = await get_btc_ohlcv(days=7)
+                if closes:
+                    strategy = await generate_strategy(price, change, closes)
+                    chart    = make_chart(times, closes, highs, lows)
+
+                    caption = (
+                        f"⚡ {alert_reason}\n\n"
+                        f"{strategy}"
+                    )
+                    await bot.send_photo(
+                        chat_id=NEWS_CHANNEL_ID,
+                        photo=chart,
+                        caption=caption,
+                    )
+                    prev_alert_time = now
+                    logger.info(f"가격 알림 발송: {alert_reason}")
+
+            prev_price = price
+
+        except Exception as e:
+            logger.error(f"모니터링 오류: {e}")
+
+        await asyncio.sleep(300)  # 5분마다 체크
+
+
+# ──────────────────────────────────────────────
+#  매일 오전 9시 크립토 모닝 브리핑
+# ──────────────────────────────────────────────
+
+MORNING_BRIEF_PROMPT = """
+너는 크립토 시장 전문 애널리스트야.
+매일 아침 크립토 시장 브리핑을 아래 형식으로 작성해줘.
+
+실제 간밤(지난 12시간) 시장 상황을 바탕으로 주요 이슈와 흐름을 정리해줘.
+
+[형식 — 정확히 이 형식으로]
+━━━━━━━━━━━━━━━━━━━━━
+🌅 크립토 모닝 브리핑
+{date} 오전 9시
+━━━━━━━━━━━━━━━━━━━━━
+
+📊 간밤 시장 요약
+• BTC: {btc_price} ({btc_change}%)
+• 전반적 시장 분위기: (한줄)
+
+🔥 주목 이슈 3가지
+① (이슈 제목): (한줄 설명)
+② (이슈 제목): (한줄 설명)  
+③ (이슈 제목): (한줄 설명)
+
+📈 오늘의 핵심 관전 포인트
+• (오늘 주목할 가격대나 이벤트)
+
+⚠️ 본 브리핑은 참고용이며 투자 판단은 본인 책임
+━━━━━━━━━━━━━━━━━━━━━
+
+[규칙]
+- 마침표 금지
+- 깔끔하고 보기 좋게
+- 실제 시장 흐름 반영
+- 전체 20줄 이내
+"""
+
+async def morning_briefing(bot: Bot):
+    """매일 오전 9시 크립토 브리핑 발송"""
+    while True:
+        try:
+            now = datetime.now()
+
+            # 오전 9시까지 대기 계산
+            target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait_seconds = (target - now).total_seconds()
+
+            logger.info(f"다음 브리핑까지 {wait_seconds/3600:.1f}시간")
+            await asyncio.sleep(wait_seconds)
+
+            # 실시간 가격 가져오기
+            price, change = await get_btc_price()
+            if not price:
+                continue
+
+            date_str   = datetime.now().strftime("%Y년 %m월 %d일")
+            change_str = f"{change:+.2f}"
+
+            prompt = MORNING_BRIEF_PROMPT.format(
+                date=date_str,
+                btc_price=f"${price:,.0f}",
+                btc_change=change_str,
+            )
+
+            response = await get_openai_client().chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user",   "content": "오늘 아침 브리핑 작성해줘"},
+                ],
+                max_tokens=600,
+                temperature=0.7,
+            )
+            brief_text = response.choices[0].message.content.strip()
+
+            await bot.send_message(
+                chat_id=NEWS_CHANNEL_ID,
+                text=brief_text,
+            )
+            logger.info("모닝 브리핑 발송 완료")
+
+        except Exception as e:
+            logger.error(f"브리핑 오류: {e}")
+            await asyncio.sleep(3600)
+
 async def post_init(application):
     asyncio.create_task(strategy_scheduler(application.bot))
     asyncio.create_task(idle_talker(application.bot))
+    asyncio.create_task(price_monitor(application.bot))
+    asyncio.create_task(morning_briefing(application.bot))
 
 def main():
     logger.info("🚀 코인이형 봇 시작!")

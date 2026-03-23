@@ -10,6 +10,9 @@ import os
 import io
 import asyncio
 import logging
+
+logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 import random
 import httpx
 import numpy as np

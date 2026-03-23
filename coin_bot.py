@@ -463,6 +463,10 @@ async def strategy_scheduler(bot: Bot):
 # 마지막 메시지 시간 추적
 last_message_time = datetime.now()
 
+# 소통방 대화 맥락 기억 (최근 100개)
+from collections import deque
+chat_history = deque(maxlen=100)
+
 async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_message_time
 
@@ -489,11 +493,17 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = message.text.strip()
     user_name = message.from_user.first_name if message.from_user else "회원"
 
+    # 대화 기록에 저장
+    chat_history.append({
+        "role": "user",
+        "content": f"{user_name}: {user_text}"
+    })
+
     # 🕐 자연스러운 딜레이 (3~8초 랜덤)
     await asyncio.sleep(random.uniform(3, 8))
 
-    # 가끔 (30% 확률) 무시 — 사람처럼 항상 답하지 않기
-    if random.random() < 0.17:
+    # 13% 확률로 무시 — 사람처럼 항상 답하지 않기
+    if random.random() < 0.13:
         return
 
     try:
@@ -503,16 +513,25 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await asyncio.sleep(random.uniform(1, 3))
 
+        # 최근 100개 대화 맥락 구성
+        messages = [{"role": "system", "content": PERSONA_PROMPT}]
+        for msg in chat_history:
+            messages.append(msg)
+
         response = await get_openai_client().chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": PERSONA_PROMPT},
-                {"role": "user",   "content": f"{user_name}: {user_text}"},
-            ],
+            messages=messages,
             max_tokens=100,
             temperature=0.9,
         )
         reply_text = response.choices[0].message.content.strip()
+
+        # 코인이형 답변도 기록에 저장
+        chat_history.append({
+            "role": "assistant",
+            "content": reply_text
+        })
+
         await message.reply_text(reply_text)
 
     except Exception as e:

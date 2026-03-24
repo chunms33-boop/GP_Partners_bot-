@@ -26,6 +26,10 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import matplotlib.dates as mdates
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+KST = ZoneInfo('Asia/Seoul')
+def now_kst():
+    return datetime.now(KST)
 from openai import AsyncOpenAI
 from telegram import Update, Bot
 from telegram.ext import (
@@ -356,9 +360,41 @@ def make_chart(times, closes, highs, lows):
 #  AI 전략 생성
 # ──────────────────────────────────────────────
 
+
+async def get_fear_greed():
+    """공포탐욕지수 가져오기 (alternative.me)"""
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                "https://api.alternative.me/fng/?limit=1",
+                timeout=10
+            )
+            data = r.json()
+            value = data["data"][0]["value"]
+            label = data["data"][0]["value_classification"]
+            label_kr = {
+                "Extreme Fear": "극도의 공포",
+                "Fear": "공포",
+                "Neutral": "중립",
+                "Greed": "탐욕",
+                "Extreme Greed": "극도의 탐욕"
+            }.get(label, label)
+            return int(value), label_kr
+    except Exception as e:
+        logger.error(f"공포탐욕 오류: {e}")
+        return None, None
+
+async def get_liquidation_data(price):
+    """청산 레벨 계산 (현재가 기준 추정)"""
+    # 주요 청산 밀집 구간 추정 (현재가 기준 ±5~10%)
+    long_liq  = round(price * 0.93, -2)   # 롱 청산 (-7%)
+    short_liq = round(price * 1.07, -2)   # 숏 청산 (+7%)
+    key_liq1  = round(price * 0.95, -2)   # 주요 롱 청산
+    key_liq2  = round(price * 1.05, -2)   # 주요 숏 청산
+    return long_liq, short_liq, key_liq1, key_liq2
+
 async def generate_strategy(price, change, closes):
     """실시간 데이터 기반 AI 트레이딩 전략 생성"""
-    # 현재 기술 지표 계산
     rsi_vals   = calc_rsi(closes)
     rsi_curr   = next((v for v in reversed(rsi_vals) if v is not None), None)
     rsi_str    = f'{rsi_curr:.1f}' if rsi_curr else 'N/A'
@@ -374,12 +410,11 @@ async def generate_strategy(price, change, closes):
     ma7_curr   = next((v for v in reversed(ma7) if v is not None), None)
     ma25_curr  = next((v for v in reversed(ma25) if v is not None), None)
 
-    # 엘리엇 파동 간단 판단
     recent = closes[-20:] if len(closes) >= 20 else closes
     trend  = "상승 추세" if recent[-1] > recent[0] else "하락 추세"
     swing  = sum(1 for i in range(1, len(recent)-1)
                  if recent[i] > recent[i-1] and recent[i] > recent[i+1])
-    wave   = f"현재 {swing}개 파동 확인, {trend}"
+    wave   = f"현재 {swing}개 파동 확인 {trend}"
 
     macd_str   = f'{macd_curr:.1f}' if macd_curr else 'N/A'
     sig_str    = f'{sig_curr:.1f}' if sig_curr else 'N/A'
@@ -388,8 +423,23 @@ async def generate_strategy(price, change, closes):
     ma7_str    = f'${ma7_curr:,.0f}' if ma7_curr else 'N/A'
     ma25_str   = f'${ma25_curr:,.0f}' if ma25_curr else 'N/A'
 
+    # 공포탐욕지수 + 청산맵
+    fg_value, fg_label = await get_fear_greed()
+    fg_str = f"{fg_value} ({fg_label})" if fg_value else "N/A"
+    long_liq, short_liq, key_liq1, key_liq2 = await get_liquidation_data(price)
+
+    # 공포탐욕 이모지
+    if fg_value:
+        if fg_value <= 25:   fg_emoji = "😱"
+        elif fg_value <= 45: fg_emoji = "😰"
+        elif fg_value <= 55: fg_emoji = "😐"
+        elif fg_value <= 75: fg_emoji = "😏"
+        else:                fg_emoji = "🤑"
+    else:
+        fg_emoji = ""
+
     prompt = f"""
-실시간 BTC 기술적 분석 데이터:
+실시간 BTC 기술적 분석 데이터 (한국시간 기준):
 - 현재가: ${price:,.0f}
 - 24h 변동: {change:+.2f}%
 - RSI(14): {rsi_str}
@@ -398,31 +448,42 @@ async def generate_strategy(price, change, closes):
 - MA7: {ma7_str} / MA25: {ma25_str}
 - 피보나치 50%: ${fib['50%']:,.0f} / 61.8%: ${fib['61.8%']:,.0f}
 - 엘리엇 파동: {wave}
+- 공포탐욕지수: {fg_str}
+- 롱 주요 청산 구간: ${key_liq1:,.0f} / ${long_liq:,.0f}
+- 숏 주요 청산 구간: ${key_liq2:,.0f} / ${short_liq:,.0f}
 
-위 데이터를 분석해서 단기 트레이딩 전략 포스팅을 아래 형식으로 써줘.
+위 데이터로 아래 형식대로 포스팅 써줘
 
 [형식]
-📊 BTC 단기 전략 — {datetime.now().strftime('%m/%d %H:%M')}
+📊 BTC 단기 전략 — {now_kst().strftime('%m/%d %H:%M')} KST
 
-💰 현재가: ${price:,.0f}  ({change:+.2f}%)
+💰 현재가  ${price:,.0f}  {change:+.2f}%
 
-📉 기술 분석:
-• RSI: (과매수/과매도/중립 판단)
-• MACD: (골든크로스/데드크로스/관망 판단)
-• 볼린저밴드: (상단/하단/중앙 위치)
-• 엘리엇 파동: (현재 파동 위치 간단히)
+📉 기술 분석
+• RSI {rsi_str} — (과매수/과매도/중립 한줄 코멘트)
+• MACD — (골든/데드크로스/관망 한줄)
+• 볼밴 — (상단/중앙/하단 위치 한줄)
+• 엘리엇 — (현재 파동 위치 한줄)
 
-🎯 단기 전략:
-• 매수 고려: (가격대)
-• 손절 기준: (가격대)
-• 목표가: (가격대)
+{fg_emoji} 공포탐욕지수  {fg_str}
+(현재 심리 한줄 코멘트)
+
+💥 청산 밀집 구간
+• 롱 청산 위험  ${key_liq1:,.0f} ~ ${long_liq:,.0f}
+• 숏 청산 위험  ${key_liq2:,.0f} ~ ${short_liq:,.0f}
+
+🎯 단기 전략
+• 매수 고려  (가격대)
+• 손절 기준  (가격대)
+• 목표가    (가격대)
 
 ⚠️ 투자 판단은 본인 책임
 
 [규칙]
-- 마침표 사용 금지
-- 전체 15줄 이내
-- 투자 권유 절대 금지, 참고용 명시
+- 마침표 쉼표 따옴표 사용 금지
+- 콜론 대신 공백으로 구분
+- 전체 20줄 이내
+- 투자 권유 절대 금지
 - 현실적인 수치 사용
 """
     response = await get_openai_client().chat.completions.create(
@@ -431,7 +492,7 @@ async def generate_strategy(price, change, closes):
             {"role": "system", "content": prompt},
             {"role": "user",   "content": "지금 바로 분석 포스팅 써줘"},
         ],
-        max_tokens=500,
+        max_tokens=600,
         temperature=0.6,
     )
     return response.choices[0].message.content.strip()
@@ -473,7 +534,7 @@ async def strategy_scheduler(bot: Bot):
 # ──────────────────────────────────────────────
 
 # 마지막 메시지 시간 추적
-last_message_time = datetime.now()
+last_message_time = now_kst()
 
 # 소통방 대화 맥락 기억 (최근 100개)
 from collections import deque
@@ -500,7 +561,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 마지막 메시지 시간 업데이트
-    last_message_time = datetime.now()
+    last_message_time = now_kst()
 
     user_text = message.text.strip()
     user_name = message.from_user.first_name if message.from_user else "회원"
@@ -518,7 +579,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(random.uniform(1, 4))
 
     # 수면 시간 체크 (새벽 1시~8시)
-    now_hour = datetime.now().hour
+    now_hour = now_kst().hour
     if 1 <= now_hour < 8:
         return  # 수면 중 완전 무시
 
@@ -601,7 +662,7 @@ async def idle_talker(bot: Bot):
 
     while True:
         await asyncio.sleep(IDLE_CHECK_MINUTES * 60)
-        silent_minutes = (datetime.now() - last_message_time).seconds // 60
+        silent_minutes = (now_kst() - last_message_time).seconds // 60
 
         if silent_minutes >= IDLE_THRESHOLD_MINUTES:
             try:
@@ -616,7 +677,7 @@ async def idle_talker(bot: Bot):
                 )
                 msg = response.choices[0].message.content.strip()
                 await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
-                last_message_time = datetime.now()
+                last_message_time = now_kst()
                 logger.info("코인이형 먼저 말 걸기 완료")
 
             except Exception as e:
@@ -645,7 +706,7 @@ async def price_monitor(bot: Bot):
                 await asyncio.sleep(300)
                 continue
 
-            now = datetime.now()
+            now = now_kst()
             should_alert = False
             alert_reason = ""
 
@@ -742,7 +803,7 @@ async def morning_briefing(bot: Bot):
     """매일 오전 9시 크립토 브리핑 발송"""
     while True:
         try:
-            now = datetime.now()
+            now = now_kst()
 
             # 오전 9시까지 대기 계산
             target = now.replace(hour=9, minute=0, second=0, microsecond=0)
@@ -758,7 +819,7 @@ async def morning_briefing(bot: Bot):
             if not price:
                 continue
 
-            date_str   = datetime.now().strftime("%Y년 %m월 %d일")
+            date_str   = now_kst().strftime("%Y년 %m월 %d일")
             change_str = f"{change:+.2f}"
 
             prompt = MORNING_BRIEF_PROMPT.format(
@@ -932,7 +993,7 @@ async def sleep_wake_scheduler(bot: Bot):
     global is_sleeping
 
     while True:
-        now = datetime.now()
+        now = now_kst()
         hour = now.hour
 
         # 밤 11시~1시 사이 랜덤하게 퇴장 인사

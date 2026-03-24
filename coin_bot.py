@@ -576,7 +576,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
     # 🕐 자연스러운 딜레이
-    await asyncio.sleep(random.uniform(1, 4))
+    await asyncio.sleep(random.uniform(3, 9))
 
     # 수면 시간 체크 (새벽 1시~8시)
     now_hour = now_kst().hour

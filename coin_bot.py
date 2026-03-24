@@ -517,7 +517,12 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🕐 자연스러운 딜레이
     await asyncio.sleep(random.uniform(1, 4))
 
-    # 5% 확률로 무시
+    # 수면 시간 체크 (새벽 1시~8시)
+    now_hour = datetime.now().hour
+    if 1 <= now_hour < 8:
+        return  # 수면 중 완전 무시
+
+    # 10% 확률로 무시
     if random.random() < 0.10:
         return
 
@@ -899,12 +904,78 @@ async def get_recent_chat_logs(limit: int = 30) -> list:
         logger.error(f"로그 조회 오류: {e}")
         return []
 
+
+# ──────────────────────────────────────────────
+#  코인이형 수면/기상 스케줄
+# ──────────────────────────────────────────────
+
+is_sleeping = False  # 수면 상태 추적
+
+SLEEP_MESSAGES = [
+    "나 오늘 좀 피곤해서 먼저 들어갈게ㅋㅋ 내일 봐요",
+    "슬슬 졸리네 ㅎㅎ 다들 좋은 밤 되세요",
+    "나 먼저 잘게요~ 내일 장 같이 봐요",
+    "오늘 하루 수고했어요 다들 ㅎㅎ 나 먼저",
+    "졸려 죽겠다ㅋㅋ 먼저 갈게 내일 봐",
+]
+
+WAKE_MESSAGES = [
+    "좋은 아침이에요~ 간밤에 장 어떻게 됐나 보자ㅋㅋ",
+    "일어났다 ㅎㅎ 오늘 장 기대되는데",
+    "굿모닝~ BTC 밤새 어떻게 됐어요",
+    "기상ㅋㅋ 다들 일어났어요?",
+    "오늘도 화이팅~ 장 한번 봐볼게요",
+]
+
+async def sleep_wake_scheduler(bot: Bot):
+    """코인이형 수면/기상 스케줄 관리"""
+    global is_sleeping
+
+    while True:
+        now = datetime.now()
+        hour = now.hour
+
+        # 밤 11시~1시 사이 랜덤하게 퇴장 인사
+        if 23 <= hour or hour == 0:
+            if not is_sleeping:
+                # 랜덤 딜레이 (0~60분)
+                await asyncio.sleep(random.randint(0, 3600))
+                try:
+                    msg = random.choice(SLEEP_MESSAGES)
+                    await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
+                    is_sleeping = True
+                    logger.info("코인이형 취침!")
+                except Exception as e:
+                    logger.error(f"취침 인사 오류: {e}")
+
+        # 새벽 1시~8시 → 완전 수면 (아무 반응 없음)
+        elif 1 <= hour < 8:
+            is_sleeping = True
+
+        # 아침 8시~9시 사이 랜덤하게 기상 인사
+        elif hour == 8:
+            if is_sleeping:
+                # 랜덤 딜레이 (0~30분)
+                await asyncio.sleep(random.randint(0, 1800))
+                try:
+                    msg = random.choice(WAKE_MESSAGES)
+                    await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
+                    is_sleeping = False
+                    logger.info("코인이형 기상!")
+                except Exception as e:
+                    logger.error(f"기상 인사 오류: {e}")
+        else:
+            is_sleeping = False
+
+        await asyncio.sleep(600)  # 10분마다 체크
+
 async def post_init(application):
     await init_db()
     asyncio.create_task(strategy_scheduler(application.bot))
     asyncio.create_task(idle_talker(application.bot))
     asyncio.create_task(price_monitor(application.bot))
     asyncio.create_task(morning_briefing(application.bot))
+    asyncio.create_task(sleep_wake_scheduler(application.bot))
 
 def main():
     logger.info("🚀 코인이형 봇 시작!")

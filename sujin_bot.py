@@ -296,7 +296,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_history.append({"role": "user", "content": f"{user_name}: {user_text}"})
 
     # 딜레이 10~20초
-    await asyncio.sleep(random.uniform(10, 20))
+    await asyncio.sleep(random.uniform(12, 22))
 
     # 30% 무시
     if random.random() < 0.30:

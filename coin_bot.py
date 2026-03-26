@@ -49,7 +49,7 @@ OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY")
 NEWS_CHANNEL_ID    = os.environ.get("NEWS_CHANNEL_ID")
 GROUP_CHAT_ID      = os.environ.get("GROUP_CHAT_ID")
 
-STRATEGY_INTERVAL_MINUTES = 120   # 전략 포스팅 주기
+STRATEGY_INTERVAL_MINUTES = 240   # 전략 포스팅 주기
 IDLE_CHECK_MINUTES        = 15    # 소통방 조용할 때 먼저 말 걸기 체크 주기
 IDLE_THRESHOLD_MINUTES    = 30    # 이 시간 이상 조용하면 코인이형이 먼저 말 걸기
 

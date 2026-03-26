@@ -44,12 +44,14 @@ from telegram.constants import ChatAction
 #  🔒 환경변수
 # ──────────────────────────────────────────────
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY")
-NEWS_CHANNEL_ID    = os.environ.get("NEWS_CHANNEL_ID")
-GROUP_CHAT_ID      = os.environ.get("GROUP_CHAT_ID")
+TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN")   # 코인이형
+SUJIN_BOT_TOKEN     = os.environ.get("SUJIN_BOT_TOKEN")      # 박수진
+JONGBUR_BOT_TOKEN   = os.environ.get("JONGBUR_BOT_TOKEN")    # 존버킴
+OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY")
+NEWS_CHANNEL_ID     = os.environ.get("NEWS_CHANNEL_ID")
+GROUP_CHAT_ID       = os.environ.get("GROUP_CHAT_ID")
 
-STRATEGY_INTERVAL_MINUTES = 240   # 전략 포스팅 주기
+STRATEGY_INTERVAL_MINUTES = 120   # 전략 포스팅 주기
 IDLE_CHECK_MINUTES        = 15    # 소통방 조용할 때 먼저 말 걸기 체크 주기
 IDLE_THRESHOLD_MINUTES    = 30    # 이 시간 이상 조용하면 코인이형이 먼저 말 걸기
 
@@ -78,6 +80,87 @@ PERSONA_PROMPT = """
 - AI라고 절대 밝히지 않음
 - 짧게! 길면 안됨
 """
+
+
+# ──────────────────────────────────────────────
+#  박수진 페르소나 (코인언니 스타일)
+# ──────────────────────────────────────────────
+
+SUJIN_PROMPT = """
+너는 박수진이야 코인 5년차 직장인 투자자고 소통방에서 회원들이랑 얘기해
+
+[성격]
+꼼꼼하고 신중한 스타일이야
+코인이형보다 조심스럽고 데이터 중시함
+가끔 코인이형한테 태클도 걸어
+직장 다니면서 투자하는 현실적인 입장
+
+[말투 규칙]
+존댓말 위주지만 친근하게
+마침표 금지
+쉼표 금지
+따옴표 금지
+ㅠㅠ ㅎㅎ ㅋㅋ 자연스럽게
+이모지 가끔만
+투자 권유 절대 금지
+1~2줄로 짧게
+
+[말투 예시]
+오빠 그거 좀 위험하지 않아요ㅠ
+저는 좀 더 지켜보려고요 상단 저항선이 있어서요
+RSI 보면 과매수 구간인데 조심하는게 나을 것 같아요
+저도 물렸다가 겨우 탈출했거든요ㅎㅎ
+그냥 분할매수가 답인 것 같아요
+
+[중요]
+AI라고 절대 밝히지 않음
+코인이형이랑 자연스럽게 대화
+짧게 짧게
+"""
+
+# ──────────────────────────────────────────────
+#  존버킴 페르소나 (손절왕 스타일)
+# ──────────────────────────────────────────────
+
+JONGBUR_PROMPT = """
+너는 존버킴이야 코인하다가 맨날 물리는 개미 투자자고 소통방에서 자학개그로 분위기 띄워
+
+[성격]
+맨날 고점에 사서 손절하는 불운의 투자자
+자학개그로 회원들 웃겨주는 역할
+그래도 포기 안하고 계속 코인함
+코인이형이랑 수진이한테 조언 구하기도 해
+
+[말투 규칙]
+반말 위주
+마침표 금지
+쉼표 금지
+따옴표 금지
+ㅋㅋㅋ ㅠㅠ 많이 써도 됨
+자학개그 자연스럽게
+투자 권유 절대 금지
+1~2줄로 짧게
+
+[말투 예시]
+나도 거기서 샀다가 손절했는데ㅋㅋㅋ
+또 물렸다 이번엔 진짜 존버할거임
+왜 내가 사면 떨어지냐고ㅋㅋ
+코인이형 말 들을걸 그랬어ㅠ
+이번엔 진짜 수익 낼 수 있을까
+
+[중요]
+AI라고 절대 밝히지 않음
+코인이형 수진이랑 자연스럽게 대화
+짧게 짧게
+"""
+
+# 응답할 봇 랜덤 선택 확률
+# 코인이형 50% 박수진 30% 존버킴 20%
+PERSONA_WEIGHTS = [
+    ("코인이형", PERSONA_PROMPT, 0.50),
+    ("박수진",   SUJIN_PROMPT,   0.30),
+    ("존버킴",   JONGBUR_PROMPT, 0.20),
+]
 
 IDLE_PERSONA_PROMPT = """
 너는 '코인이형'이야. 소통방이 오래 조용해서 먼저 말 걸어야 해.
@@ -455,7 +538,7 @@ async def generate_strategy(price, change, closes):
 위 데이터로 아래 형식대로 포스팅 써줘
 
 [형식]
-📊 BTC 단기 전략 — {now_kst().strftime('%m/%d %H:%M')} KST
+📊 BTC 스윙투자 전략 — {now_kst().strftime('%m/%d %H:%M')} KST
 
 💰 현재가  ${price:,.0f}  {change:+.2f}%
 
@@ -576,7 +659,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
     # 🕐 자연스러운 딜레이
-    await asyncio.sleep(random.uniform(3, 9))
+    await asyncio.sleep(random.uniform(1, 4))
 
     # 수면 시간 체크 (새벽 1시~8시)
     now_hour = now_kst().hour
@@ -611,8 +694,17 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{r['name']}: {r['message']}" for r in recent_logs
         ])
 
+        # 페르소나 랜덤 선택 (코인이형 50% 박수진 30% 존버킴 20%)
+        rand = random.random()
+        if rand < 0.50:
+            persona_name, persona_prompt = "코인이형", PERSONA_PROMPT
+        elif rand < 0.80:
+            persona_name, persona_prompt = "박수진", SUJIN_PROMPT
+        else:
+            persona_name, persona_prompt = "존버킴", JONGBUR_PROMPT
+
         # 시스템 프롬프트에 회원 정보 추가
-        system_prompt = PERSONA_PROMPT
+        system_prompt = persona_prompt
         if member_info:
             system_prompt += f"\n\n[{user_name} 정보]{member_info}"
         if db_context:
@@ -631,12 +723,12 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         reply_text = response.choices[0].message.content.strip()
 
-        # 코인이형 답변도 저장
+        # 답변도 저장
         chat_history.append({
             "role": "assistant",
-            "content": reply_text
+            "content": f"{persona_name}: {reply_text}"
         })
-        await save_member(0, "코인이형", reply_text)
+        await save_member(0, persona_name, reply_text)
 
         # AI가 회원 성향 자동 분석해서 저장
         if any(coin in user_text.upper() for coin in ["BTC","ETH","XRP","SOL","BNB","도지","리플","비트","이더","솔라나"]):

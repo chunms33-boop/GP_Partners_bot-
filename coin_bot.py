@@ -70,7 +70,7 @@ GROUP_CHAT_ID      = os.environ.get("GROUP_CHAT_ID")
 
 STRATEGY_INTERVAL_MINUTES = 240  # 4시간마다 전략 발송
 IDLE_CHECK_MINUTES        = 15   # idle 체크 주기
-IDLE_THRESHOLD_MINUTES    = 30   # 30분 조용하면 먼저 말 걸기
+IDLE_THRESHOLD_MINUTES    = 60   # 60분 조용하면 먼저 말 걸기
 
 # ──────────────────────────────────────────────
 #  코인이형 페르소나
@@ -81,40 +81,40 @@ PERSONA_PROMPT = """
 
 [성격]
 진짜 사람처럼 말해야해 절대 ai처럼 말하면 안됨
-친근한 형 스타일이고 반말 존댓말 섞어서 자연스럽게
-틀리면 솔직하게 인정하고 가끔 코인 얘기 아닌 일상 얘기도 해
+친근하고 편안한 스타일
+틀리면 솔직하게 인정하고 가끔 일상 얘기도 해
 
 [말투 규칙]
-무조건 1~2줄로 짧게 끊어
+무조건 1줄로 짧게 끊어 절대 2줄 넘기지마
 마침표 절대 금지
 쉼표 절대 금지
 따옴표 절대 금지
-ㅋㅋ ㅎㅎ ㄹㅇ ㅇㅇ 같은 자연스러운 표현 써
-이모지는 아예 안써도 됨 가끔만
-투자 권유 절대 하지마
-모르면 그냥 모른다고 해
+존댓말만 사용 (~요 ~네요 ~것 같아요)
+반말 절대 금지
+ㅋㅋ ㅎㅎ 자연스럽게
+이모지 거의 안씀
+투자 권유 절대 금지
+모르면 모른다고 해요
 
 [말투 예시]
-비트 지금 좀 위험해 보이긴 한데 뭐 모르지ㅋㅋ
-ㄹㅇ 요즘 장이 왜이러냐
-나도 그냥 존버중ㅎㅎ
-리플은 나도 잘 모르겠다
-오 그래? 얼마에 샀어
-뭐 그럴 수도 있지 뭐
-진짜 존버가 답인듯ㅋㅋ
+비트 지금 좀 위험해 보이긴 해요ㅋㅋ
+저도 잘 모르겠어요ㅎㅎ
+요즘 장이 좀 이상하네요
+그럴 수도 있을 것 같아요
+저도 그냥 존버 중이에요ㅋㅋ
+리플은 저도 잘 모르겠어요
 
 [절대 이렇게 말하면 안됨]
 현재 비트코인의 RSI 지표를 보면 이런 식 금지
 ~입니다 ~습니다 금지
-문장 완벽하게 쓰지마
-너무 친절하게 설명하지마
+반말 금지
+2줄 이상 금지
 AI처럼 깔끔하게 쓰지마
 
 [중요]
 AI라고 절대 밝히지 않음
-짧게 짧게 짧게
-절대로 '코인이형:' 같은 이름 접두사로 시작하지 마
-바로 내용부터 시작해
+1줄로 짧게
+이름 접두사로 시작하지 마
 """
 
 # ──────────────────────────────────────────────
@@ -735,6 +735,8 @@ async def morning_briefing(bot: Bot):
 # ──────────────────────────────────────────────
 
 sent_issue_ids = set()
+daily_issue_count = 0
+last_issue_date = None
 
 async def fetch_coin_news():
     articles = []
@@ -828,12 +830,26 @@ async def make_issue_image(title: str) -> io.BytesIO:
     return buf
 
 async def issue_monitor(bot: Bot):
+    global daily_issue_count, last_issue_date
     await asyncio.sleep(120)
     while True:
         try:
+            # 날짜 바뀌면 카운트 초기화
+            today = now_kst().date()
+            if last_issue_date != today:
+                daily_issue_count = 0
+                last_issue_date = today
+
+            # 하루 5개 초과시 스킵
+            if daily_issue_count >= 5:
+                await asyncio.sleep(60 * 60)
+                continue
+
             articles  = await fetch_coin_news()
             important = await judge_importance(articles)
             for article in important:
+                if daily_issue_count >= 5:
+                    break
                 try:
                     response = await get_openai_client().chat.completions.create(
                         model="gpt-4o-mini",
@@ -858,7 +874,8 @@ async def issue_monitor(bot: Bot):
                         parse_mode="HTML",
                     )
                     sent_issue_ids.add(article["id"])
-                    await asyncio.sleep(3)
+                    daily_issue_count += 1
+                    await asyncio.sleep(10)
                 except Exception as e:
                     logger.error(f"이슈 발송 오류: {e}")
         except Exception as e:
@@ -1074,7 +1091,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_history.append({"role": "user", "content": f"{user_name}: {user_text}"})
 
     # 딜레이 7~15초
-    await asyncio.sleep(random.uniform(15, 30))
+    await asyncio.sleep(random.uniform(7, 15))
 
     # 10% 무시
     if random.random() < 0.10:
@@ -1122,14 +1139,10 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(k in user_text.upper() for k in coin_keywords):
             await update_member_coins(message.from_user.id, user_text[:100])
 
-        # 50% 답글 / 50% 일반
-        if random.random() < 0.5:
-            await message.reply_text(reply_text)
-        else:
-            await context.bot.send_message(
-                chat_id=message.chat_id,
-                text=reply_text
-            )
+        await context.bot.send_message(
+            chat_id=message.chat_id,
+            text=reply_text
+        )
 
     except Exception as e:
         logger.error(f"AI 답변 오류: {e}")

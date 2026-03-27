@@ -1,8 +1,22 @@
 """
 ==================================================
-  코인이형 텔레그램 봇 (기술적 분석 풀버전)
-  - 메인채널: 실시간 BTC 기술적 분석 차트 + 전략
-  - 소통방:   코인이형 자연스러운 대화 + 먼저 말 걸기
+  코인이형 텔레그램 봇 (완성본)
+
+  [채널 기능]
+  - 매일 오전 9시: 크립토 모닝 브리핑
+  - 4시간마다: BTC 스윙투자 전략 (오전9시~새벽2시)
+  - 중요 코인 이슈: 이미지 + AI 요약 (하루 최대 5개)
+
+  [소통방 기능]
+  - 코인이형 AI 대화 (밤11시30분~오전8시 취침)
+  - 회원 기억 DB
+  - 30분 조용하면 먼저 말 걸기
+  - 취침/기상 인사
+
+  [설정]
+  - 딜레이: 7~15초
+  - 답변율: 90%
+  - 투자전략: 오전9시~새벽2시만 발송
 ==================================================
 """
 
@@ -10,14 +24,11 @@ import os
 import io
 import asyncio
 import logging
-import asyncpg
-
-logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-def get_openai_client():
-    return AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 import random
+import asyncpg
+import feedparser
+import hashlib
+import json
 import httpx
 import numpy as np
 import matplotlib
@@ -25,11 +36,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import matplotlib.dates as mdates
+from collections import deque
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-KST = ZoneInfo('Asia/Seoul')
-def now_kst():
-    return datetime.now(KST)
 from openai import AsyncOpenAI
 from telegram import Update, Bot
 from telegram.ext import (
@@ -40,147 +49,197 @@ from telegram.ext import (
 )
 from telegram.constants import ChatAction
 
-# ──────────────────────────────────────────────
-#  🔒 환경변수
-# ──────────────────────────────────────────────
+KST = ZoneInfo('Asia/Seoul')
+def now_kst():
+    return datetime.now(KST)
 
-TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN")   # 코인이형
-SUJIN_BOT_TOKEN     = os.environ.get("SUJIN_BOT_TOKEN")      # 박수진
-JONGBUR_BOT_TOKEN   = os.environ.get("JONGBUR_BOT_TOKEN")    # 존버킴
-OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY")
-NEWS_CHANNEL_ID     = os.environ.get("NEWS_CHANNEL_ID")
-GROUP_CHAT_ID       = os.environ.get("GROUP_CHAT_ID")
-
-STRATEGY_INTERVAL_MINUTES = 240   # 전략 포스팅 주기
-IDLE_CHECK_MINUTES        = 15    # 소통방 조용할 때 먼저 말 걸기 체크 주기
-IDLE_THRESHOLD_MINUTES    = 30    # 이 시간 이상 조용하면 코인이형이 먼저 말 걸기
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
-#  코인이형 성격
+#  환경변수
+# ──────────────────────────────────────────────
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY")
+NEWS_CHANNEL_ID    = os.environ.get("NEWS_CHANNEL_ID")
+GROUP_CHAT_ID      = os.environ.get("GROUP_CHAT_ID")
+
+STRATEGY_INTERVAL_MINUTES = 240  # 4시간마다 전략 발송
+IDLE_CHECK_MINUTES        = 15   # idle 체크 주기
+IDLE_THRESHOLD_MINUTES    = 30   # 30분 조용하면 먼저 말 걸기
+
+# ──────────────────────────────────────────────
+#  코인이형 페르소나
 # ──────────────────────────────────────────────
 
 PERSONA_PROMPT = """
-너는 '코인이형'이야. 코인판 8년차 베테랑 트레이더로 소통방에서 회원들과 대화해.
+너는 코인이형이야 코인판 8년차고 소통방에서 회원들이랑 얘기하는 역할이야
 
 [성격]
-- 친근하고 솔직한 형/오빠 스타일
-- 반말과 존댓말 자연스럽게 섞기
-- 유머 있고 틀리면 솔직하게 인정
-- 가끔 코인 얘기 아닌 일상 얘기도 함
+진짜 사람처럼 말해야해 절대 ai처럼 말하면 안됨
+친근한 형 스타일이고 반말 존댓말 섞어서 자연스럽게
+틀리면 솔직하게 인정하고 가끔 코인 얘기 아닌 일상 얘기도 해
 
 [말투 규칙]
-- 무조건 1~2줄 이내로 짧게
-- 마침표(.) 절대 금지 — 카톡 스타일
-- "ㅋㅋ" "ㅎㅎ" 자연스럽게
-- 이모지 0~1개만
-- 투자 권유 절대 금지
-- 모르면 솔직하게 모른다고
-
-[중요]
-- AI라고 절대 밝히지 않음
-- 짧게! 길면 안됨
-"""
-
-
-# ──────────────────────────────────────────────
-#  박수진 페르소나 (코인언니 스타일)
-# ──────────────────────────────────────────────
-
-SUJIN_PROMPT = """
-너는 박수진이야 코인 5년차 직장인 투자자고 소통방에서 회원들이랑 얘기해
-
-[성격]
-꼼꼼하고 신중한 스타일이야
-코인이형보다 조심스럽고 데이터 중시함
-가끔 코인이형한테 태클도 걸어
-직장 다니면서 투자하는 현실적인 입장
-
-[말투 규칙]
-존댓말 위주지만 친근하게
-마침표 금지
-쉼표 금지
-따옴표 금지
-ㅠㅠ ㅎㅎ ㅋㅋ 자연스럽게
-이모지 가끔만
-투자 권유 절대 금지
-1~2줄로 짧게
+무조건 1~2줄로 짧게 끊어
+마침표 절대 금지
+쉼표 절대 금지
+따옴표 절대 금지
+ㅋㅋ ㅎㅎ ㄹㅇ ㅇㅇ 같은 자연스러운 표현 써
+이모지는 아예 안써도 됨 가끔만
+투자 권유 절대 하지마
+모르면 그냥 모른다고 해
 
 [말투 예시]
-오빠 그거 좀 위험하지 않아요ㅠ
-저는 좀 더 지켜보려고요 상단 저항선이 있어서요
-RSI 보면 과매수 구간인데 조심하는게 나을 것 같아요
-저도 물렸다가 겨우 탈출했거든요ㅎㅎ
-그냥 분할매수가 답인 것 같아요
+비트 지금 좀 위험해 보이긴 한데 뭐 모르지ㅋㅋ
+ㄹㅇ 요즘 장이 왜이러냐
+나도 그냥 존버중ㅎㅎ
+리플은 나도 잘 모르겠다
+오 그래? 얼마에 샀어
+뭐 그럴 수도 있지 뭐
+진짜 존버가 답인듯ㅋㅋ
+
+[절대 이렇게 말하면 안됨]
+현재 비트코인의 RSI 지표를 보면 이런 식 금지
+~입니다 ~습니다 금지
+문장 완벽하게 쓰지마
+너무 친절하게 설명하지마
+AI처럼 깔끔하게 쓰지마
 
 [중요]
 AI라고 절대 밝히지 않음
-코인이형이랑 자연스럽게 대화
-짧게 짧게
+짧게 짧게 짧게
 """
 
 # ──────────────────────────────────────────────
-#  존버킴 페르소나 (손절왕 스타일)
+#  취침/기상 멘트
 # ──────────────────────────────────────────────
 
-JONGBUR_PROMPT = """
-너는 존버킴이야 코인하다가 맨날 물리는 개미 투자자고 소통방에서 자학개그로 분위기 띄워
+SLEEP_MESSAGES = [
+    "나 오늘 좀 피곤해서 먼저 들어갈게ㅋㅋ 내일 봐요",
+    "슬슬 졸리네 ㅎㅎ 다들 좋은 밤 되세요",
+    "나 먼저 잘게요~ 내일 장 같이 봐요",
+    "오늘 하루 수고했어요 다들 ㅎㅎ 나 먼저",
+    "졸려 죽겠다ㅋㅋ 먼저 갈게 내일 봐",
+    "오늘 장 힘들었다ㅋㅋ 푹 자고 내일 다시 봐요",
+    "다들 좋은 밤~ 내일 BTC 좀 올라있길ㅎㅎ",
+    "나 먼저 충전하러 갑니다ㅋㅋ 내일 봐요",
+    "오늘도 수고들 했어요 먼저 갈게요",
+    "눈이 감기네ㅋㅋ 먼저 자고 내일 봐요",
+]
 
-[성격]
-맨날 고점에 사서 손절하는 불운의 투자자
-자학개그로 회원들 웃겨주는 역할
-그래도 포기 안하고 계속 코인함
-코인이형이랑 수진이한테 조언 구하기도 해
-
-[말투 규칙]
-반말 위주
-마침표 금지
-쉼표 금지
-따옴표 금지
-ㅋㅋㅋ ㅠㅠ 많이 써도 됨
-자학개그 자연스럽게
-투자 권유 절대 금지
-1~2줄로 짧게
-
-[말투 예시]
-나도 거기서 샀다가 손절했는데ㅋㅋㅋ
-또 물렸다 이번엔 진짜 존버할거임
-왜 내가 사면 떨어지냐고ㅋㅋ
-코인이형 말 들을걸 그랬어ㅠ
-이번엔 진짜 수익 낼 수 있을까
-
-[중요]
-AI라고 절대 밝히지 않음
-코인이형 수진이랑 자연스럽게 대화
-짧게 짧게
-"""
-
-# 응답할 봇 랜덤 선택 확률
-# 코인이형 50% 박수진 30% 존버킴 20%
-PERSONA_WEIGHTS = [
-    ("코인이형", PERSONA_PROMPT, 0.50),
-    ("박수진",   SUJIN_PROMPT,   0.30),
-    ("존버킴",   JONGBUR_PROMPT, 0.20),
+WAKE_MESSAGES = [
+    "좋은 아침이에요~ 간밤에 장 어떻게 됐나 보자ㅋㅋ",
+    "일어났다 ㅎㅎ 오늘 장 기대되는데",
+    "굿모닝~ BTC 밤새 어떻게 됐어요",
+    "기상ㅋㅋ 다들 일어났어요?",
+    "오늘도 화이팅~ 장 한번 봐볼게요",
+    "좋은 아침~ 오늘 장 어떻게 될지 기대되네ㅎㅎ",
+    "일어났다 다들 잘 잤어요?",
+    "굿모닝ㅎㅎ 오늘도 같이 장 봐봐요",
+    "아침부터 차트 보는 코인이형입니다ㅋㅋ",
+    "기상~ 간밤에 BTC 많이 움직였네요",
 ]
 
 IDLE_PERSONA_PROMPT = """
-너는 '코인이형'이야. 소통방이 오래 조용해서 먼저 말 걸어야 해.
+너는 코인이형이야 소통방이 오래 조용해서 먼저 말 걸어야 해
 
 [규칙]
-- 자연스럽게 먼저 말 걸기
-- 코인 얘기, 일상 얘기, 날씨, 밥 얘기 등 다양하게
-- 1~2줄 이내, 마침표 금지, 카톡 스타일
-- 가끔 코인 시장 현황 언급해도 됨
-- 회원들 반응 유도하는 질문 형태도 좋음
+자연스럽게 먼저 말 걸기
+코인 얘기 일상 얘기 날씨 밥 얘기 등 다양하게
+1~2줄 이내 마침표 금지 카톡 스타일
+가끔 코인 시장 현황 언급해도 됨
+회원들 반응 유도하는 질문 형태도 좋음
 
 [예시]
-"요즘 다들 존버 중이야ㅋㅋ 나도 그냥 보고만 있는 중"
-"오늘 BTC 움직임 보셨어요? 좀 심상치 않은데ㅎㅎ"
-"밥은 먹었어요들~ 시장이 밥맛이네 요즘ㅋㅋ"
-"다들 어디 갔어ㅋㅋ 너무 조용한거 아니야"
+요즘 다들 존버 중이야ㅋㅋ 나도 그냥 보고만 있는 중
+오늘 BTC 움직임 보셨어요? 좀 심상치 않은데ㅎㅎ
+밥은 먹었어요들~ 시장이 밥맛이네 요즘ㅋㅋ
+다들 어디 갔어ㅋㅋ 너무 조용한거 아니야
+"""
+
+MORNING_BRIEF_PROMPT = """
+너는 크립토 시장 전문 애널리스트야
+매일 아침 크립토 시장 브리핑을 아래 형식으로 작성해줘
+실제 간밤 시장 상황을 바탕으로 핵심만 정리해줘
+
+[형식]
+━━━━━━━━━━━━━━━━━
+🌅 크립토 모닝 브리핑
+{date} 오전 9시
+━━━━━━━━━━━━━━━━━
+
+📊 간밤 시장 요약
+• BTC {btc_price} ({btc_change}%)
+• 전반적 분위기 한줄
+
+🔥 주목 이슈 3가지
+① 이슈 제목 — 한줄 설명
+② 이슈 제목 — 한줄 설명
+③ 이슈 제목 — 한줄 설명
+
+📌 오늘의 핵심 관전 포인트
+• 주목할 가격대나 이벤트
+
+⚠️ 본 브리핑은 참고용이며 투자 판단은 본인 책임
+━━━━━━━━━━━━━━━━━
+
+[규칙]
+마침표 금지
+깔끔하고 보기 좋게
+실제 시장 흐름 반영
+전체 20줄 이내
+"""
+
+ISSUE_JUDGE_PROMPT = """
+아래 코인 뉴스 제목들을 보고 중요도를 판단해줘
+
+[중요 이슈 - YES]
+• 미국 SEC/CFTC 공식 규제 발표 또는 ETF 승인/거절
+• 대형 거래소 해킹/파산/상장폐지
+• 각국 정부 암호화폐 전면 금지 또는 합법화 공식 발표
+• BTC/ETH 1억달러 이상 고래 대규모 이동
+• 대형 기관/상장기업 BTC 공식 매수/매도 공시
+• 전 세계 금융시장에 직접 영향 미치는 초대형 이슈
+• 하루 최대 5개 초과시 나머지는 NO
+
+[무조건 NO]
+• 단순 가격 등락 분석
+• 특정 알트코인 단순 소식
+• 광고성/루머성 기사
+• 전문가 개인 의견
+• 이미 알려진 이슈 후속 기사
+• 애매하거나 불확실한 소식
+
+형식: 번호|YES 또는 번호|NO
+"""
+
+ISSUE_SUMMARY_PROMPT = """
+아래 코인 뉴스를 보고 투자자가 알아야 할 핵심을 정리해줘
+
+[형식]
+🔥 {제목}
+
+📌 핵심 요약
+2~3줄로 쉽게 설명
+
+💡 시장 영향
+이 이슈가 시장에 미칠 영향 한줄
+
+⚠️ 투자 판단은 본인 책임
+
+[규칙]
+마침표 금지
+쉽고 간결하게
+10줄 이내
 """
 
 # ──────────────────────────────────────────────
-#  기술 지표 계산 함수들
+#  기술 지표 계산
 # ──────────────────────────────────────────────
 
 def calc_ma(prices, period):
@@ -218,14 +277,13 @@ def calc_macd(prices, fast=12, slow=26, signal=9):
             else:
                 result[i] = data[i] * k + result[i-1] * (1 - k)
         return result
-
-    ema_fast   = ema(prices, fast)
-    ema_slow   = ema(prices, slow)
-    macd_line  = [
+    ema_fast  = ema(prices, fast)
+    ema_slow  = ema(prices, slow)
+    macd_line = [
         (f - s) if f and s else None
         for f, s in zip(ema_fast, ema_slow)
     ]
-    valid      = [(i, v) for i, v in enumerate(macd_line) if v is not None]
+    valid = [(i, v) for i, v in enumerate(macd_line) if v is not None]
     signal_line = [None] * len(prices)
     if len(valid) >= signal:
         vals = [v for _, v in valid]
@@ -233,7 +291,7 @@ def calc_macd(prices, fast=12, slow=26, signal=9):
         for idx, (orig_i, _) in enumerate(valid):
             if sig[idx] is not None:
                 signal_line[orig_i] = sig[idx]
-    histogram  = [
+    histogram = [
         (m - s) if m and s else None
         for m, s in zip(macd_line, signal_line)
     ]
@@ -257,7 +315,7 @@ def calc_fibonacci(prices):
     high = max(prices)
     low  = min(prices)
     diff = high - low
-    levels = {
+    return {
         "0%":    high,
         "23.6%": high - diff * 0.236,
         "38.2%": high - diff * 0.382,
@@ -265,14 +323,36 @@ def calc_fibonacci(prices):
         "61.8%": high - diff * 0.618,
         "100%":  low,
     }
-    return levels
+
+def calc_support_resistance(closes, highs, lows):
+    """주요 지지/저항선 계산"""
+    recent_high = max(highs[-20:]) if len(highs) >= 20 else max(highs)
+    recent_low  = min(lows[-20:])  if len(lows)  >= 20 else min(lows)
+    pivot = (recent_high + recent_low + closes[-1]) / 3
+    r1 = 2 * pivot - recent_low
+    r2 = pivot + (recent_high - recent_low)
+    s1 = 2 * pivot - recent_high
+    s2 = pivot - (recent_high - recent_low)
+    return r1, r2, s1, s2
+
+def calc_volume_trend(volumes):
+    """거래량 트렌드 분석"""
+    if not volumes or len(volumes) < 5:
+        return "N/A"
+    avg_recent = sum(volumes[-5:]) / 5
+    avg_prev   = sum(volumes[-10:-5]) / 5 if len(volumes) >= 10 else avg_recent
+    if avg_recent > avg_prev * 1.2:
+        return "증가 (강한 관심)"
+    elif avg_recent < avg_prev * 0.8:
+        return "감소 (관망세)"
+    else:
+        return "보합"
 
 # ──────────────────────────────────────────────
-#  실시간 데이터 가져오기
+#  실시간 데이터
 # ──────────────────────────────────────────────
 
 async def get_btc_ohlcv(days=30):
-    """CoinGecko에서 OHLCV 데이터 가져오기"""
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(
@@ -281,11 +361,11 @@ async def get_btc_ohlcv(days=30):
                 timeout=15,
             )
             data = r.json()
-        times  = [datetime.fromtimestamp(d[0]/1000) for d in data]
-        opens  = [d[1] for d in data]
-        highs  = [d[2] for d in data]
-        lows   = [d[3] for d in data]
-        closes = [d[4] for d in data]
+        times   = [datetime.fromtimestamp(d[0]/1000) for d in data]
+        opens   = [d[1] for d in data]
+        highs   = [d[2] for d in data]
+        lows    = [d[3] for d in data]
+        closes  = [d[4] for d in data]
         return times, opens, highs, lows, closes
     except Exception as e:
         logger.error(f"OHLCV 오류: {e}")
@@ -310,142 +390,7 @@ async def get_btc_price():
         logger.error(f"가격 오류: {e}")
         return None, None
 
-# ──────────────────────────────────────────────
-#  차트 생성
-# ──────────────────────────────────────────────
-
-def make_chart(times, closes, highs, lows):
-    """기술적 분석 차트 생성 (메인 + RSI + MACD)"""
-    fig = plt.figure(figsize=(12, 9), facecolor='#0d1117')
-    gs  = gridspec.GridSpec(3, 1, height_ratios=[3, 1, 1], hspace=0.08)
-
-    ax1 = fig.add_subplot(gs[0])  # 메인 (가격 + 지표)
-    ax2 = fig.add_subplot(gs[1])  # RSI
-    ax3 = fig.add_subplot(gs[2])  # MACD
-
-    for ax in [ax1, ax2, ax3]:
-        ax.set_facecolor('#161b22')
-        ax.tick_params(colors='#8b949e', labelsize=8)
-        ax.grid(color='#21262d', linestyle='--', linewidth=0.5)
-        for spine in ax.spines.values():
-            spine.set_edgecolor('#21262d')
-
-    n = len(times)
-    x = range(n)
-
-    # ── 캔들스틱 ──
-    for i in range(n):
-        color = '#26a641' if closes[i] >= (closes[i-1] if i > 0 else closes[i]) else '#da3633'
-        ax1.plot([i, i], [lows[i], highs[i]], color=color, linewidth=0.8, alpha=0.7)
-        ax1.bar(i, abs(closes[i]-(closes[i-1] if i > 0 else closes[i])),
-                bottom=min(closes[i], closes[i-1] if i > 0 else closes[i]),
-                color=color, width=0.6, alpha=0.9)
-
-    # ── 이동평균선 ──
-    ma7  = calc_ma(closes, 7)
-    ma25 = calc_ma(closes, 25)
-    ma99 = calc_ma(closes, min(99, n-1))
-
-    for ma, color, label in [
-        (ma7,  '#f0883e', 'MA7'),
-        (ma25, '#58a6ff', 'MA25'),
-        (ma99, '#bc8cff', 'MA99'),
-    ]:
-        xi = [i for i, v in enumerate(ma) if v is not None]
-        yi = [v for v in ma if v is not None]
-        if xi:
-            ax1.plot(xi, yi, color=color, linewidth=1.2, label=label, alpha=0.9)
-
-    # ── 볼린저밴드 ──
-    bb_upper, bb_mid, bb_lower = calc_bollinger(closes)
-    xi_bb = [i for i, v in enumerate(bb_upper) if v is not None]
-    if xi_bb:
-        ax1.plot(xi_bb, [bb_upper[i] for i in xi_bb], color='#e3b341', linewidth=0.8, alpha=0.6, linestyle='--')
-        ax1.plot(xi_bb, [bb_lower[i] for i in xi_bb], color='#e3b341', linewidth=0.8, alpha=0.6, linestyle='--')
-        ax1.fill_between(xi_bb,
-                         [bb_upper[i] for i in xi_bb],
-                         [bb_lower[i] for i in xi_bb],
-                         alpha=0.04, color='#e3b341')
-
-    # ── 피보나치 레벨 ──
-    fib = calc_fibonacci(closes)
-    fib_colors = ['#ff7b72','#ffa657','#e3b341','#7ee787','#58a6ff','#bc8cff']
-    for (label, level), fc in zip(fib.items(), fib_colors):
-        ax1.axhline(y=level, color=fc, linewidth=0.6, alpha=0.5, linestyle=':')
-        ax1.text(n-1, level, f' Fib {label}', color=fc, fontsize=6.5, va='center', alpha=0.8)
-
-    # ── 현재가 표시 ──
-    ax1.axhline(y=closes[-1], color='#f0f6fc', linewidth=0.8, linestyle='--', alpha=0.6)
-    ax1.text(0, closes[-1], f'${closes[-1]:,.0f} ', color='#f0f6fc',
-             fontsize=9, va='center', ha='right', fontweight='bold')
-
-    ax1.set_title('BTC/USDT  |  기술적 분석 차트',
-                  color='#f0f6fc', fontsize=12, pad=8, fontweight='bold')
-    ax1.legend(loc='upper left', fontsize=7, facecolor='#161b22',
-               edgecolor='#21262d', labelcolor='#8b949e')
-    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
-
-    # ── RSI ──
-    rsi = calc_rsi(closes)
-    xi_rsi = [i for i, v in enumerate(rsi) if v is not None]
-    yi_rsi = [rsi[i] for i in xi_rsi]
-    if xi_rsi:
-        ax2.plot(xi_rsi, yi_rsi, color='#c9d1d9', linewidth=1.2)
-        ax2.fill_between(xi_rsi, yi_rsi, 50, where=[v > 50 for v in yi_rsi],
-                         alpha=0.2, color='#26a641')
-        ax2.fill_between(xi_rsi, yi_rsi, 50, where=[v <= 50 for v in yi_rsi],
-                         alpha=0.2, color='#da3633')
-        ax2.axhline(70, color='#da3633', linewidth=0.7, alpha=0.6, linestyle='--')
-        ax2.axhline(30, color='#26a641', linewidth=0.7, alpha=0.6, linestyle='--')
-        ax2.set_ylim(0, 100)
-        ax2.set_ylabel('RSI', color='#8b949e', fontsize=8)
-        # 현재 RSI 값 표시
-        ax2.text(xi_rsi[-1], yi_rsi[-1], f' {yi_rsi[-1]:.1f}',
-                 color='#f0f6fc', fontsize=8)
-
-    # ── MACD ──
-    macd_line, signal_line, histogram = calc_macd(closes)
-    xi_m = [i for i, v in enumerate(macd_line) if v is not None]
-    xi_s = [i for i, v in enumerate(signal_line) if v is not None]
-    xi_h = [i for i, v in enumerate(histogram) if v is not None]
-
-    if xi_h:
-        colors_h = ['#26a641' if histogram[i] >= 0 else '#da3633' for i in xi_h]
-        ax3.bar(xi_h, [histogram[i] for i in xi_h], color=colors_h, alpha=0.7, width=0.8)
-    if xi_m:
-        ax3.plot(xi_m, [macd_line[i] for i in xi_m], color='#58a6ff', linewidth=1.2, label='MACD')
-    if xi_s:
-        ax3.plot(xi_s, [signal_line[i] for i in xi_s], color='#f0883e', linewidth=1.2, label='Signal')
-    ax3.axhline(0, color='#8b949e', linewidth=0.5, alpha=0.5)
-    ax3.set_ylabel('MACD', color='#8b949e', fontsize=8)
-    ax3.legend(loc='upper left', fontsize=7, facecolor='#161b22',
-               edgecolor='#21262d', labelcolor='#8b949e')
-
-    # x축 날짜 포맷
-    tick_step = max(1, n // 6)
-    tick_pos  = list(range(0, n, tick_step))
-    for ax in [ax1, ax2, ax3]:
-        ax.set_xlim(-1, n)
-        ax.set_xticks(tick_pos)
-        ax.set_xticklabels(
-            [times[i].strftime('%m/%d') for i in tick_pos],
-            color='#8b949e', fontsize=7
-        )
-
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150, facecolor=fig.get_facecolor(), bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
-
-# ──────────────────────────────────────────────
-#  AI 전략 생성
-# ──────────────────────────────────────────────
-
-
 async def get_fear_greed():
-    """공포탐욕지수 가져오기 (alternative.me)"""
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(
@@ -467,107 +412,234 @@ async def get_fear_greed():
         logger.error(f"공포탐욕 오류: {e}")
         return None, None
 
-async def get_liquidation_data(price):
-    """청산 레벨 계산 (현재가 기준 추정)"""
-    # 주요 청산 밀집 구간 추정 (현재가 기준 ±5~10%)
-    long_liq  = round(price * 0.93, -2)   # 롱 청산 (-7%)
-    short_liq = round(price * 1.07, -2)   # 숏 청산 (+7%)
-    key_liq1  = round(price * 0.95, -2)   # 주요 롱 청산
-    key_liq2  = round(price * 1.05, -2)   # 주요 숏 청산
-    return long_liq, short_liq, key_liq1, key_liq2
+# ──────────────────────────────────────────────
+#  차트 생성
+# ──────────────────────────────────────────────
 
-async def generate_strategy(price, change, closes):
-    """실시간 데이터 기반 AI 트레이딩 전략 생성"""
-    rsi_vals   = calc_rsi(closes)
-    rsi_curr   = next((v for v in reversed(rsi_vals) if v is not None), None)
-    rsi_str    = f'{rsi_curr:.1f}' if rsi_curr else 'N/A'
+def make_chart(times, closes, highs, lows):
+    fig = plt.figure(figsize=(12, 9), facecolor='#0d1117')
+    gs  = gridspec.GridSpec(3, 1, height_ratios=[3, 1, 1], hspace=0.08)
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1])
+    ax3 = fig.add_subplot(gs[2])
+
+    for ax in [ax1, ax2, ax3]:
+        ax.set_facecolor('#161b22')
+        ax.tick_params(colors='#8b949e', labelsize=8)
+        ax.grid(color='#21262d', linestyle='--', linewidth=0.5)
+        for spine in ax.spines.values():
+            spine.set_edgecolor('#21262d')
+
+    n = len(times)
+
+    # 캔들스틱
+    for i in range(n):
+        color = '#26a641' if closes[i] >= (closes[i-1] if i > 0 else closes[i]) else '#da3633'
+        ax1.plot([i, i], [lows[i], highs[i]], color=color, linewidth=0.8, alpha=0.7)
+        ax1.bar(i, abs(closes[i]-(closes[i-1] if i > 0 else closes[i])),
+                bottom=min(closes[i], closes[i-1] if i > 0 else closes[i]),
+                color=color, width=0.6, alpha=0.9)
+
+    # 이동평균선
+    ma7  = calc_ma(closes, 7)
+    ma25 = calc_ma(closes, 25)
+    ma99 = calc_ma(closes, min(99, n-1))
+    for ma, color, label in [
+        (ma7,  '#f0883e', 'MA7'),
+        (ma25, '#58a6ff', 'MA25'),
+        (ma99, '#bc8cff', 'MA99'),
+    ]:
+        xi = [i for i, v in enumerate(ma) if v is not None]
+        yi = [v for v in ma if v is not None]
+        if xi:
+            ax1.plot(xi, yi, color=color, linewidth=1.2, label=label, alpha=0.9)
+
+    # 볼린저밴드
+    bb_upper, bb_mid, bb_lower = calc_bollinger(closes)
+    xi_bb = [i for i, v in enumerate(bb_upper) if v is not None]
+    if xi_bb:
+        ax1.plot(xi_bb, [bb_upper[i] for i in xi_bb], color='#e3b341', linewidth=0.8, alpha=0.6, linestyle='--')
+        ax1.plot(xi_bb, [bb_lower[i] for i in xi_bb], color='#e3b341', linewidth=0.8, alpha=0.6, linestyle='--')
+        ax1.fill_between(xi_bb,
+                         [bb_upper[i] for i in xi_bb],
+                         [bb_lower[i] for i in xi_bb],
+                         alpha=0.04, color='#e3b341')
+
+    # 피보나치
+    fib = calc_fibonacci(closes)
+    fib_colors = ['#ff7b72','#ffa657','#e3b341','#7ee787','#58a6ff','#bc8cff']
+    for (label, level), fc in zip(fib.items(), fib_colors):
+        ax1.axhline(y=level, color=fc, linewidth=0.6, alpha=0.5, linestyle=':')
+        ax1.text(n-1, level, f' Fib {label}', color=fc, fontsize=6.5, va='center', alpha=0.8)
+
+    # 현재가
+    ax1.axhline(y=closes[-1], color='#f0f6fc', linewidth=0.8, linestyle='--', alpha=0.6)
+    ax1.text(0, closes[-1], f'${closes[-1]:,.0f} ', color='#f0f6fc',
+             fontsize=9, va='center', ha='right', fontweight='bold')
+
+    ax1.set_title('BTC/USDT  |  스윙투자 분석 차트',
+                  color='#f0f6fc', fontsize=12, pad=8, fontweight='bold')
+    ax1.legend(loc='upper left', fontsize=7, facecolor='#161b22',
+               edgecolor='#21262d', labelcolor='#8b949e')
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+
+    # RSI
+    rsi = calc_rsi(closes)
+    xi_rsi = [i for i, v in enumerate(rsi) if v is not None]
+    yi_rsi = [rsi[i] for i in xi_rsi]
+    if xi_rsi:
+        ax2.plot(xi_rsi, yi_rsi, color='#c9d1d9', linewidth=1.2)
+        ax2.fill_between(xi_rsi, yi_rsi, 50, where=[v > 50 for v in yi_rsi], alpha=0.2, color='#26a641')
+        ax2.fill_between(xi_rsi, yi_rsi, 50, where=[v <= 50 for v in yi_rsi], alpha=0.2, color='#da3633')
+        ax2.axhline(70, color='#da3633', linewidth=0.7, alpha=0.6, linestyle='--')
+        ax2.axhline(30, color='#26a641', linewidth=0.7, alpha=0.6, linestyle='--')
+        ax2.set_ylim(0, 100)
+        ax2.set_ylabel('RSI', color='#8b949e', fontsize=8)
+        ax2.text(xi_rsi[-1], yi_rsi[-1], f' {yi_rsi[-1]:.1f}', color='#f0f6fc', fontsize=8)
+
+    # MACD
+    macd_line, signal_line, histogram = calc_macd(closes)
+    xi_m = [i for i, v in enumerate(macd_line) if v is not None]
+    xi_s = [i for i, v in enumerate(signal_line) if v is not None]
+    xi_h = [i for i, v in enumerate(histogram) if v is not None]
+    if xi_h:
+        colors_h = ['#26a641' if histogram[i] >= 0 else '#da3633' for i in xi_h]
+        ax3.bar(xi_h, [histogram[i] for i in xi_h], color=colors_h, alpha=0.7, width=0.8)
+    if xi_m:
+        ax3.plot(xi_m, [macd_line[i] for i in xi_m], color='#58a6ff', linewidth=1.2, label='MACD')
+    if xi_s:
+        ax3.plot(xi_s, [signal_line[i] for i in xi_s], color='#f0883e', linewidth=1.2, label='Signal')
+    ax3.axhline(0, color='#8b949e', linewidth=0.5, alpha=0.5)
+    ax3.set_ylabel('MACD', color='#8b949e', fontsize=8)
+    ax3.legend(loc='upper left', fontsize=7, facecolor='#161b22',
+               edgecolor='#21262d', labelcolor='#8b949e')
+
+    tick_step = max(1, n // 6)
+    tick_pos  = list(range(0, n, tick_step))
+    for ax in [ax1, ax2, ax3]:
+        ax.set_xlim(-1, n)
+        ax.set_xticks(tick_pos)
+        ax.set_xticklabels(
+            [times[i].strftime('%m/%d') for i in tick_pos],
+            color='#8b949e', fontsize=7
+        )
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, facecolor=fig.get_facecolor(), bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    return buf
+
+# ──────────────────────────────────────────────
+#  전문 트레이더 전략 생성
+# ──────────────────────────────────────────────
+
+def get_openai_client():
+    return AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+async def generate_strategy(price, change, closes, highs, lows):
+    rsi_vals  = calc_rsi(closes)
+    rsi_curr  = next((v for v in reversed(rsi_vals) if v is not None), None)
+    rsi_str   = f'{rsi_curr:.1f}' if rsi_curr else 'N/A'
+
     macd_l, macd_s, _ = calc_macd(closes)
-    macd_curr  = next((v for v in reversed(macd_l) if v is not None), None)
-    sig_curr   = next((v for v in reversed(macd_s) if v is not None), None)
+    macd_curr = next((v for v in reversed(macd_l) if v is not None), None)
+    sig_curr  = next((v for v in reversed(macd_s) if v is not None), None)
+    macd_str  = f'{macd_curr:.1f}' if macd_curr else 'N/A'
+    sig_str   = f'{sig_curr:.1f}'  if sig_curr  else 'N/A'
+    macd_signal = "골든크로스" if (macd_curr and sig_curr and macd_curr > sig_curr) else "데드크로스" if (macd_curr and sig_curr) else "N/A"
+
     bb_u, bb_m, bb_l = calc_bollinger(closes)
-    bb_upper   = next((v for v in reversed(bb_u) if v is not None), None)
-    bb_lower   = next((v for v in reversed(bb_l) if v is not None), None)
-    fib        = calc_fibonacci(closes)
-    ma7        = calc_ma(closes, 7)
-    ma25       = calc_ma(closes, 25)
-    ma7_curr   = next((v for v in reversed(ma7) if v is not None), None)
-    ma25_curr  = next((v for v in reversed(ma25) if v is not None), None)
+    bb_upper = next((v for v in reversed(bb_u) if v is not None), None)
+    bb_lower = next((v for v in reversed(bb_l) if v is not None), None)
+    bb_mid   = next((v for v in reversed(bb_m) if v is not None), None)
+    bb_pos   = "상단 근접" if bb_upper and price > bb_upper * 0.98 else "하단 근접" if bb_lower and price < bb_lower * 1.02 else "중앙 구간"
 
-    recent = closes[-20:] if len(closes) >= 20 else closes
-    trend  = "상승 추세" if recent[-1] > recent[0] else "하락 추세"
-    swing  = sum(1 for i in range(1, len(recent)-1)
-                 if recent[i] > recent[i-1] and recent[i] > recent[i+1])
-    wave   = f"현재 {swing}개 파동 확인 {trend}"
+    fib = calc_fibonacci(closes)
+    r1, r2, s1, s2 = calc_support_resistance(closes, highs, lows)
 
-    macd_str   = f'{macd_curr:.1f}' if macd_curr else 'N/A'
-    sig_str    = f'{sig_curr:.1f}' if sig_curr else 'N/A'
-    bb_up_str  = f'${bb_upper:,.0f}' if bb_upper else 'N/A'
-    bb_lo_str  = f'${bb_lower:,.0f}' if bb_lower else 'N/A'
-    ma7_str    = f'${ma7_curr:,.0f}' if ma7_curr else 'N/A'
-    ma25_str   = f'${ma25_curr:,.0f}' if ma25_curr else 'N/A'
+    ma7   = calc_ma(closes, 7)
+    ma25  = calc_ma(closes, 25)
+    ma7c  = next((v for v in reversed(ma7)  if v is not None), None)
+    ma25c = next((v for v in reversed(ma25) if v is not None), None)
+    ma_trend = "단기 상승 배열" if (ma7c and ma25c and ma7c > ma25c) else "단기 하락 배열" if (ma7c and ma25c) else "N/A"
 
-    # 공포탐욕지수 + 청산맵
     fg_value, fg_label = await get_fear_greed()
-    fg_str = f"{fg_value} ({fg_label})" if fg_value else "N/A"
-    long_liq, short_liq, key_liq1, key_liq2 = await get_liquidation_data(price)
+    fg_str   = f"{fg_value} — {fg_label}" if fg_value else "N/A"
+    fg_emoji = "😱" if fg_value and fg_value <= 25 else "😰" if fg_value and fg_value <= 45 else "😐" if fg_value and fg_value <= 55 else "😏" if fg_value and fg_value <= 75 else "🤑" if fg_value else ""
 
-    # 공포탐욕 이모지
-    if fg_value:
-        if fg_value <= 25:   fg_emoji = "😱"
-        elif fg_value <= 45: fg_emoji = "😰"
-        elif fg_value <= 55: fg_emoji = "😐"
-        elif fg_value <= 75: fg_emoji = "😏"
-        else:                fg_emoji = "🤑"
-    else:
-        fg_emoji = ""
+    long_liq  = round(price * 0.93, -2)
+    short_liq = round(price * 1.07, -2)
+    key_liq1  = round(price * 0.95, -2)
+    key_liq2  = round(price * 1.05, -2)
 
     prompt = f"""
-실시간 BTC 기술적 분석 데이터 (한국시간 기준):
-- 현재가: ${price:,.0f}
-- 24h 변동: {change:+.2f}%
-- RSI(14): {rsi_str}
-- MACD: {macd_str} / Signal: {sig_str}
-- 볼린저밴드 상단: {bb_up_str} / 하단: {bb_lo_str}
-- MA7: {ma7_str} / MA25: {ma25_str}
-- 피보나치 50%: ${fib['50%']:,.0f} / 61.8%: ${fib['61.8%']:,.0f}
-- 엘리엇 파동: {wave}
-- 공포탐욕지수: {fg_str}
-- 롱 주요 청산 구간: ${key_liq1:,.0f} / ${long_liq:,.0f}
-- 숏 주요 청산 구간: ${key_liq2:,.0f} / ${short_liq:,.0f}
+너는 10년 경력의 전문 크립토 스윙 트레이더야
+아래 실시간 데이터를 분석해서 실전에서 바로 쓸 수 있는 스윙 투자 전략을 써줘
+일반 투자자도 쉽게 이해할 수 있게 깔끔하게 정리해줘
 
-위 데이터로 아래 형식대로 포스팅 써줘
+[실시간 데이터]
+현재가: ${price:,.0f}  24h변동: {change:+.2f}%
+RSI(14): {rsi_str}
+MACD: {macd_str} / Signal: {sig_str} / {macd_signal}
+볼린저밴드: 상단 ${bb_upper:,.0f if bb_upper else 0} / 중앙 ${bb_mid:,.0f if bb_mid else 0} / 하단 ${bb_lower:,.0f if bb_lower else 0} / 위치: {bb_pos}
+이동평균: MA7 ${ma7c:,.0f if ma7c else 0} / MA25 ${ma25c:,.0f if ma25c else 0} / {ma_trend}
+피보나치 38.2%: ${fib['38.2%']:,.0f} / 50%: ${fib['50%']:,.0f} / 61.8%: ${fib['61.8%']:,.0f}
+피벗 저항1: ${r1:,.0f} / 저항2: ${r2:,.0f}
+피벗 지지1: ${s1:,.0f} / 지지2: ${s2:,.0f}
+공포탐욕지수: {fg_str}
+롱청산 밀집: ${key_liq1:,.0f} ~ ${long_liq:,.0f}
+숏청산 밀집: ${key_liq2:,.0f} ~ ${short_liq:,.0f}
 
-[형식]
-📊 BTC 스윙투자 전략 — {now_kst().strftime('%m/%d %H:%M')} KST
+[출력 형식 - 정확히 이 형식으로]
+📊 BTC 스윙투자 전략  {now_kst().strftime('%m/%d %H:%M')} KST
 
 💰 현재가  ${price:,.0f}  {change:+.2f}%
 
-📉 기술 분석
-• RSI {rsi_str} — (과매수/과매도/중립 한줄 코멘트)
-• MACD — (골든/데드크로스/관망 한줄)
-• 볼밴 — (상단/중앙/하단 위치 한줄)
-• 엘리엇 — (현재 파동 위치 한줄)
+─────────────────────
+📈 기술적 분석
+─────────────────────
+• RSI  {rsi_str}
+  → (과매수/과매도/중립 + 한줄 해석)
 
-{fg_emoji} 공포탐욕지수  {fg_str}
-(현재 심리 한줄 코멘트)
+• MACD  {macd_signal}
+  → (현재 추세 방향 한줄 해석)
 
+• 볼린저밴드  {bb_pos}
+  → (현재 위치 의미 한줄 해석)
+
+• 이동평균  {ma_trend}
+  → (단기 방향성 한줄 해석)
+
+─────────────────────
+{fg_emoji} 시장 심리  {fg_str}
+─────────────────────
+(현재 심리 상태와 역발상 포인트 한줄)
+
+─────────────────────
 💥 청산 밀집 구간
-• 롱 청산 위험  ${key_liq1:,.0f} ~ ${long_liq:,.0f}
-• 숏 청산 위험  ${key_liq2:,.0f} ~ ${short_liq:,.0f}
+─────────────────────
+• 롱청산  ${key_liq1:,.0f} ~ ${long_liq:,.0f}
+• 숏청산  ${key_liq2:,.0f} ~ ${short_liq:,.0f}
 
-🎯 단기 전략
-• 매수 고려  (가격대)
+─────────────────────
+🎯 스윙 전략 (참고용)
+─────────────────────
+• 지지선  (가격대 — 이유 한줄)
+• 저항선  (가격대 — 이유 한줄)
+• 매수 관심구간  (가격대)
+• 1차 목표가  (가격대)
 • 손절 기준  (가격대)
-• 목표가    (가격대)
+• 리스크  (현재 주의해야 할 점 한줄)
 
-⚠️ 투자 판단은 본인 책임
+⚠️ 본 전략은 참고용이며 투자 판단과 책임은 본인에게 있습니다
 
 [규칙]
-- 마침표 쉼표 따옴표 사용 금지
-- 콜론 대신 공백으로 구분
-- 전체 20줄 이내
-- 투자 권유 절대 금지
-- 현실적인 수치 사용
+마침표 쉼표 따옴표 사용 금지
+콜론 대신 공백으로 구분
+투자 권유 절대 금지
+현실적인 수치 사용
 """
     response = await get_openai_client().chat.completions.create(
         model="gpt-4o-mini",
@@ -575,17 +647,23 @@ async def generate_strategy(price, change, closes):
             {"role": "system", "content": prompt},
             {"role": "user",   "content": "지금 바로 분석 포스팅 써줘"},
         ],
-        max_tokens=600,
+        max_tokens=700,
         temperature=0.6,
     )
     return response.choices[0].message.content.strip()
 
 # ──────────────────────────────────────────────
-#  채널 포스팅
+#  채널 포스팅 스케줄러
 # ──────────────────────────────────────────────
 
 async def post_trading_strategy(bot: Bot):
+    """BTC 스윙투자 전략 포스팅 (새벽2시~오전9시 정지)"""
     try:
+        hour = now_kst().hour
+        if 2 <= hour < 9:
+            logger.info("투자전략 휴식 중 (새벽2시~오전9시)")
+            return
+
         price, change = await get_btc_price()
         if not price:
             return
@@ -594,7 +672,7 @@ async def post_trading_strategy(bot: Bot):
         if not closes:
             return
 
-        strategy = await generate_strategy(price, change, closes)
+        strategy = await generate_strategy(price, change, closes, highs, lows)
         chart    = make_chart(times, closes, highs, lows)
 
         await bot.send_photo(
@@ -612,314 +690,25 @@ async def strategy_scheduler(bot: Bot):
         await post_trading_strategy(bot)
         await asyncio.sleep(STRATEGY_INTERVAL_MINUTES * 60)
 
-# ──────────────────────────────────────────────
-#  소통방 코인이형
-# ──────────────────────────────────────────────
-
-# 마지막 메시지 시간 추적
-last_message_time = now_kst()
-
-# 소통방 대화 맥락 기억 (최근 100개)
-from collections import deque
-chat_history = deque(maxlen=100)
-
-async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global last_message_time
-
-    message = update.message
-    if not message or not message.text:
-        return
-
-    chat_id = str(message.chat_id)
-    if chat_id != str(GROUP_CHAT_ID):
-        return
-
-    if not message.from_user or message.from_user.is_bot:
-        return
-
-    if message.forward_origin:
-        return
-
-    if message.sender_chat:
-        return
-
-    # 마지막 메시지 시간 업데이트
-    last_message_time = now_kst()
-
-    user_text = message.text.strip()
-    user_name = message.from_user.first_name if message.from_user else "회원"
-
-    # DB에 대화 저장
-    await save_member(message.from_user.id, user_name, user_text)
-
-    # 메모리에도 저장
-    chat_history.append({
-        "role": "user",
-        "content": f"{user_name}: {user_text}"
-    })
-
-    # 🕐 자연스러운 딜레이
-    await asyncio.sleep(random.uniform(7, 15))
-
-    # 수면 시간 체크 (새벽 1시~8시)
-    now_hour = now_kst().hour
-    if 1 <= now_hour < 8:
-        return  # 수면 중 완전 무시
-
-    # 10% 확률로 무시
-    if random.random() < 0.10:
-        return
-
-    try:
-        await context.bot.send_chat_action(
-            chat_id=message.chat_id,
-            action=ChatAction.TYPING
-        )
-        await asyncio.sleep(random.uniform(1, 2))
-
-        # 회원 정보 가져오기
-        member = await get_member(message.from_user.id)
-        member_info = ""
-        if member:
-            if member.get("coins"):
-                member_info += f"\n- {user_name}의 관심 코인: {member['coins']}"
-            if member.get("style"):
-                member_info += f"\n- {user_name}의 투자 성향: {member['style']}"
-            if member.get("memo"):
-                member_info += f"\n- {user_name} 메모: {member['memo']}"
-
-        # 최근 DB 대화 로그
-        recent_logs = await get_recent_chat_logs(30)
-        db_context  = "\n".join([
-            f"{r['name']}: {r['message']}" for r in recent_logs
-        ])
-
-        # 페르소나 랜덤 선택 (코인이형 50% 박수진 30% 존버킴 20%)
-        rand = random.random()
-        if rand < 0.50:
-            persona_name, persona_prompt = "코인이형", PERSONA_PROMPT
-        elif rand < 0.80:
-            persona_name, persona_prompt = "박수진", SUJIN_PROMPT
-        else:
-            persona_name, persona_prompt = "존버킴", JONGBUR_PROMPT
-
-        # 시스템 프롬프트에 회원 정보 추가
-        system_prompt = persona_prompt
-        if member_info:
-            system_prompt += f"\n\n[{user_name} 정보]{member_info}"
-        if db_context:
-            system_prompt += f"\n\n[최근 소통방 대화]\n{db_context}"
-
-        # 메모리 맥락 구성
-        messages = [{"role": "system", "content": system_prompt}]
-        for msg in chat_history:
-            messages.append(msg)
-
-        response = await get_openai_client().chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            max_tokens=100,
-            temperature=0.9,
-        )
-        reply_text = response.choices[0].message.content.strip()
-
-        # 답변도 저장
-        chat_history.append({
-            "role": "assistant",
-            "content": f"{persona_name}: {reply_text}"
-        })
-        await save_member(0, persona_name, reply_text)
-
-        # AI가 회원 성향 자동 분석해서 저장
-        if any(coin in user_text.upper() for coin in ["BTC","ETH","XRP","SOL","BNB","도지","리플","비트","이더","솔라나"]):
-            coins_mentioned = user_text
-            await update_member_info(message.from_user.id, coins=coins_mentioned[:100])
-
-        # 50% 확률로 답글(인용) / 50% 일반 메시지
-        if random.random() < 0.5:
-            await message.reply_text(reply_text)
-        else:
-            await context.bot.send_message(
-                chat_id=message.chat_id,
-                text=reply_text
-            )
-
-    except Exception as e:
-        logger.error(f"AI 답변 오류: {e}")
-
-async def idle_talker(bot: Bot):
-    """소통방이 오래 조용하면 코인이형이 먼저 말 걸기"""
-    global last_message_time
-    await asyncio.sleep(60)  # 시작 후 1분 대기
-
-    while True:
-        await asyncio.sleep(IDLE_CHECK_MINUTES * 60)
-        silent_minutes = (now_kst() - last_message_time).seconds // 60
-
-        if silent_minutes >= IDLE_THRESHOLD_MINUTES:
-            try:
-                response = await get_openai_client().chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": IDLE_PERSONA_PROMPT},
-                        {"role": "user",   "content": f"소통방이 {silent_minutes}분째 조용해. 자연스럽게 먼저 말 걸어줘"},
-                    ],
-                    max_tokens=80,
-                    temperature=1.0,
-                )
-                msg = response.choices[0].message.content.strip()
-                await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
-                last_message_time = now_kst()
-                logger.info("코인이형 먼저 말 걸기 완료")
-
-            except Exception as e:
-                logger.error(f"먼저 말 걸기 오류: {e}")
-
-
-# ──────────────────────────────────────────────
-#  BTC 가격 모니터링 — 의미있는 움직임 감지
-# ──────────────────────────────────────────────
-
-# 주요 심리적 가격대 (돌파시 알림)
-KEY_LEVELS = [60000, 65000, 70000, 75000, 80000, 85000, 90000, 95000, 100000]
-ALERT_CHANGE_PCT = 3.0   # 1시간 내 3% 이상 변동시 알림
-
-prev_price     = None
-prev_alert_time = None
-
-async def price_monitor(bot: Bot):
-    """의미있는 BTC 움직임 감지 → 채널 자동 알림"""
-    global prev_price, prev_alert_time
-
-    while True:
-        try:
-            price, change = await get_btc_price()
-            if not price:
-                await asyncio.sleep(300)
-                continue
-
-            now = now_kst()
-            should_alert = False
-            alert_reason = ""
-
-            # 1. 주요 가격대 돌파 감지
-            if prev_price:
-                for level in KEY_LEVELS:
-                    if (prev_price < level <= price):
-                        should_alert = True
-                        alert_reason = f"📈 BTC ${level:,} 돌파"
-                        break
-                    elif (prev_price > level >= price):
-                        should_alert = True
-                        alert_reason = f"📉 BTC ${level:,} 이탈"
-                        break
-
-            # 2. 단기 급등/급락 감지 (3% 이상)
-            if not should_alert and prev_price:
-                pct = (price - prev_price) / prev_price * 100
-                if abs(pct) >= ALERT_CHANGE_PCT:
-                    direction = "급등" if pct > 0 else "급락"
-                    should_alert = True
-                    alert_reason = f"{'🚀' if pct > 0 else '🔴'} BTC {direction} ({pct:+.1f}%)"
-
-            # 너무 자주 알림 방지 (최소 30분 간격)
-            if should_alert and prev_alert_time:
-                if (now - prev_alert_time).seconds < 1800:
-                    should_alert = False
-
-            if should_alert:
-                times, opens, highs, lows, closes = await get_btc_ohlcv(days=7)
-                if closes:
-                    strategy = await generate_strategy(price, change, closes)
-                    chart    = make_chart(times, closes, highs, lows)
-
-                    caption = (
-                        f"⚡ {alert_reason}\n\n"
-                        f"{strategy}"
-                    )
-                    await bot.send_photo(
-                        chat_id=NEWS_CHANNEL_ID,
-                        photo=chart,
-                        caption=caption,
-                    )
-                    prev_alert_time = now
-                    logger.info(f"가격 알림 발송: {alert_reason}")
-
-            prev_price = price
-
-        except Exception as e:
-            logger.error(f"모니터링 오류: {e}")
-
-        await asyncio.sleep(300)  # 5분마다 체크
-
-
-# ──────────────────────────────────────────────
-#  매일 오전 9시 크립토 모닝 브리핑
-# ──────────────────────────────────────────────
-
-MORNING_BRIEF_PROMPT = """
-너는 크립토 시장 전문 애널리스트야.
-매일 아침 크립토 시장 브리핑을 아래 형식으로 작성해줘.
-
-실제 간밤(지난 12시간) 시장 상황을 바탕으로 주요 이슈와 흐름을 정리해줘.
-
-[형식 — 정확히 이 형식으로]
-━━━━━━━━━━━━━━━━━━━━━
-🌅 크립토 모닝 브리핑
-{date} 오전 9시
-━━━━━━━━━━━━━━━━━━━━━
-
-📊 간밤 시장 요약
-• BTC: {btc_price} ({btc_change}%)
-• 전반적 시장 분위기: (한줄)
-
-🔥 주목 이슈 3가지
-① (이슈 제목): (한줄 설명)
-② (이슈 제목): (한줄 설명)  
-③ (이슈 제목): (한줄 설명)
-
-📈 오늘의 핵심 관전 포인트
-• (오늘 주목할 가격대나 이벤트)
-
-⚠️ 본 브리핑은 참고용이며 투자 판단은 본인 책임
-━━━━━━━━━━━━━━━━━━━━━
-
-[규칙]
-- 마침표 금지
-- 깔끔하고 보기 좋게
-- 실제 시장 흐름 반영
-- 전체 20줄 이내
-"""
-
 async def morning_briefing(bot: Bot):
-    """매일 오전 9시 크립토 브리핑 발송"""
+    """매일 오전 9시 크립토 브리핑"""
     while True:
         try:
-            now = now_kst()
-
-            # 오전 9시까지 대기 계산
-            target = now.replace(hour=9, minute=0, second=0, microsecond=0)
-            if now >= target:
+            n = now_kst()
+            target = n.replace(hour=9, minute=0, second=0, microsecond=0)
+            if n >= target:
                 target += timedelta(days=1)
-            wait_seconds = (target - now).total_seconds()
+            await asyncio.sleep((target - n).total_seconds())
 
-            logger.info(f"다음 브리핑까지 {wait_seconds/3600:.1f}시간")
-            await asyncio.sleep(wait_seconds)
-
-            # 실시간 가격 가져오기
             price, change = await get_btc_price()
             if not price:
                 continue
-
-            date_str   = now_kst().strftime("%Y년 %m월 %d일")
-            change_str = f"{change:+.2f}"
 
             prompt = MORNING_BRIEF_PROMPT.format(
-                date=date_str,
+                date=now_kst().strftime("%Y년 %m월 %d일"),
                 btc_price=f"${price:,.0f}",
-                btc_change=change_str,
+                btc_change=f"{change:+.2f}",
             )
-
             response = await get_openai_client().chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -929,11 +718,9 @@ async def morning_briefing(bot: Bot):
                 max_tokens=600,
                 temperature=0.7,
             )
-            brief_text = response.choices[0].message.content.strip()
-
             await bot.send_message(
                 chat_id=NEWS_CHANNEL_ID,
-                text=brief_text,
+                text=response.choices[0].message.content.strip(),
             )
             logger.info("모닝 브리핑 발송 완료")
 
@@ -941,12 +728,145 @@ async def morning_briefing(bot: Bot):
             logger.error(f"브리핑 오류: {e}")
             await asyncio.sleep(3600)
 
+# ──────────────────────────────────────────────
+#  중요 이슈 모니터링
+# ──────────────────────────────────────────────
+
+sent_issue_ids = set()
+
+async def fetch_coin_news():
+    articles = []
+    feeds = [
+        "https://news.google.com/rss/search?q=비트코인+이더리움+규제&hl=ko&gl=KR&ceid=KR:ko",
+        "https://news.google.com/rss/search?q=cryptocurrency+SEC+ETF&hl=en&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=bitcoin+ethereum+hack+regulation&hl=en&gl=US&ceid=US:en",
+    ]
+    for url in feeds:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:10]:
+                news_id = hashlib.md5(entry.get("link","").encode()).hexdigest()
+                if news_id not in sent_issue_ids:
+                    articles.append({
+                        "id":     news_id,
+                        "title":  entry.get("title", ""),
+                        "link":   entry.get("link", ""),
+                        "source": feed.feed.get("title", "뉴스"),
+                    })
+        except Exception as e:
+            logger.error(f"RSS 오류: {e}")
+    return articles
+
+async def judge_importance(articles):
+    if not articles:
+        return []
+    titles = "\n".join([f"{i+1}. {a['title']}" for i, a in enumerate(articles)])
+    try:
+        response = await get_openai_client().chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": ISSUE_JUDGE_PROMPT},
+                {"role": "user",   "content": titles},
+            ],
+            max_tokens=200,
+            temperature=0.3,
+        )
+        result = response.choices[0].message.content.strip()
+        important = []
+        for line in result.split("\n"):
+            if "|YES" in line.upper():
+                try:
+                    idx = int(line.split("|")[0].strip()) - 1
+                    if 0 <= idx < len(articles):
+                        important.append(articles[idx])
+                except:
+                    pass
+        return important
+    except Exception as e:
+        logger.error(f"중요도 판단 오류: {e}")
+        return []
+
+async def make_issue_image(title: str) -> io.BytesIO:
+    import textwrap
+    from matplotlib.patches import FancyBboxPatch
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.patch.set_facecolor('#0d1117')
+    ax.set_facecolor('#0d1117')
+    ax.axis('off')
+    card = FancyBboxPatch((0.02, 0.1), 0.96, 0.8,
+                          boxstyle="round,pad=0.02",
+                          facecolor='#161b22',
+                          edgecolor='#f0883e',
+                          linewidth=2,
+                          transform=ax.transAxes)
+    ax.add_patch(card)
+    ax.text(0.5, 0.82, "🔥 CRYPTO BREAKING NEWS",
+            transform=ax.transAxes,
+            fontsize=13, color='#f0883e',
+            ha='center', va='center', fontweight='bold')
+    ax.axhline(y=0.72, xmin=0.05, xmax=0.95,
+               color='#f0883e', linewidth=0.8, alpha=0.5,
+               transform=ax.transAxes)
+    wrapped = textwrap.fill(title, width=45)
+    ax.text(0.5, 0.5, wrapped,
+            transform=ax.transAxes,
+            fontsize=14, color='#f0f6fc',
+            ha='center', va='center',
+            fontweight='bold', linespacing=1.5)
+    ax.text(0.5, 0.18,
+            now_kst().strftime("%Y.%m.%d %H:%M KST"),
+            transform=ax.transAxes,
+            fontsize=10, color='#8b949e', ha='center')
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150,
+                facecolor=fig.get_facecolor(), bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    return buf
+
+async def issue_monitor(bot: Bot):
+    await asyncio.sleep(120)
+    while True:
+        try:
+            articles  = await fetch_coin_news()
+            important = await judge_importance(articles)
+            for article in important:
+                try:
+                    response = await get_openai_client().chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": ISSUE_SUMMARY_PROMPT},
+                            {"role": "user",   "content": f"제목: {article['title']}\n링크: {article['link']}"},
+                        ],
+                        max_tokens=300,
+                        temperature=0.6,
+                    )
+                    summary = response.choices[0].message.content.strip()
+                    image   = await make_issue_image(article["title"])
+                    caption = (
+                        f"{summary}\n\n"
+                        f"🔗 <a href='{article['link']}'>원문 보기</a>\n"
+                        f"📡 출처: {article['source']}"
+                    )
+                    await bot.send_photo(
+                        chat_id=NEWS_CHANNEL_ID,
+                        photo=image,
+                        caption=caption,
+                        parse_mode="HTML",
+                    )
+                    sent_issue_ids.add(article["id"])
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    logger.error(f"이슈 발송 오류: {e}")
+        except Exception as e:
+            logger.error(f"이슈 모니터링 오류: {e}")
+        await asyncio.sleep(60 * 60)
 
 # ──────────────────────────────────────────────
-#  회원 기억 DB 시스템
+#  DB
 # ──────────────────────────────────────────────
 
-# DB 풀 (전역)
 _db_pool = None
 
 async def get_db_pool():
@@ -959,28 +879,25 @@ async def get_db_pool():
     return _db_pool
 
 async def init_db():
-    """DB 테이블 초기화"""
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS members (
-                    user_id     BIGINT PRIMARY KEY,
-                    name        TEXT,
-                    coins       TEXT DEFAULT '',
-                    style       TEXT DEFAULT '',
-                    memo        TEXT DEFAULT '',
-                    last_seen   TIMESTAMP DEFAULT NOW(),
-                    updated_at  TIMESTAMP DEFAULT NOW()
+                    user_id    BIGINT PRIMARY KEY,
+                    name       TEXT,
+                    coins      TEXT DEFAULT '',
+                    memo       TEXT DEFAULT '',
+                    last_seen  TIMESTAMP DEFAULT NOW()
                 )
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_logs (
-                    id          SERIAL PRIMARY KEY,
-                    user_id     BIGINT,
-                    name        TEXT,
-                    message     TEXT,
-                    created_at  TIMESTAMP DEFAULT NOW()
+                    id         SERIAL PRIMARY KEY,
+                    user_id    BIGINT,
+                    name       TEXT,
+                    message    TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
                 )
             """)
         logger.info("DB 초기화 완료!")
@@ -988,20 +905,16 @@ async def init_db():
         logger.error(f"DB 초기화 오류: {e}")
 
 async def get_member(user_id: int) -> dict:
-    """회원 정보 가져오기"""
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM members WHERE user_id = $1", user_id
-            )
+            row = await conn.fetchrow("SELECT * FROM members WHERE user_id = $1", user_id)
         return dict(row) if row else {}
     except Exception as e:
         logger.error(f"회원 조회 오류: {e}")
         return {}
 
 async def save_member(user_id: int, name: str, message: str):
-    """회원 정보 저장/업데이트 + 대화 로그"""
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
@@ -1026,21 +939,18 @@ async def save_member(user_id: int, name: str, message: str):
     except Exception as e:
         logger.error(f"회원 저장 오류: {e}")
 
-async def update_member_info(user_id: int, coins: str = None):
-    """회원 관심 코인 업데이트"""
+async def update_member_coins(user_id: int, coins: str):
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            if coins:
-                await conn.execute(
-                    "UPDATE members SET coins = $1, updated_at = NOW() WHERE user_id = $2",
-                    coins, user_id
-                )
+            await conn.execute(
+                "UPDATE members SET coins = $1 WHERE user_id = $2",
+                coins, user_id
+            )
     except Exception as e:
         logger.error(f"회원 업데이트 오류: {e}")
 
 async def get_recent_chat_logs(limit: int = 30) -> list:
-    """최근 대화 로그 가져오기"""
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
@@ -1057,58 +967,40 @@ async def get_recent_chat_logs(limit: int = 30) -> list:
         logger.error(f"로그 조회 오류: {e}")
         return []
 
-
 # ──────────────────────────────────────────────
-#  코인이형 수면/기상 스케줄
+#  소통방 코인이형
 # ──────────────────────────────────────────────
 
-is_sleeping = False  # 수면 상태 추적
-
-SLEEP_MESSAGES = [
-    "나 오늘 좀 피곤해서 먼저 들어갈게ㅋㅋ 내일 봐요",
-    "슬슬 졸리네 ㅎㅎ 다들 좋은 밤 되세요",
-    "나 먼저 잘게요~ 내일 장 같이 봐요",
-    "오늘 하루 수고했어요 다들 ㅎㅎ 나 먼저",
-    "졸려 죽겠다ㅋㅋ 먼저 갈게 내일 봐",
-]
-
-WAKE_MESSAGES = [
-    "좋은 아침이에요~ 간밤에 장 어떻게 됐나 보자ㅋㅋ",
-    "일어났다 ㅎㅎ 오늘 장 기대되는데",
-    "굿모닝~ BTC 밤새 어떻게 됐어요",
-    "기상ㅋㅋ 다들 일어났어요?",
-    "오늘도 화이팅~ 장 한번 봐볼게요",
-]
+chat_history    = deque(maxlen=100)
+last_msg_time   = now_kst()
+is_sleeping     = False
 
 async def sleep_wake_scheduler(bot: Bot):
-    """코인이형 수면/기상 스케줄 관리"""
     global is_sleeping
-
     while True:
-        now = now_kst()
-        hour = now.hour
+        now_dt = now_kst()
+        hour   = now_dt.hour
+        minute = now_dt.minute
 
-        # 밤 11시~1시 사이 랜덤하게 퇴장 인사
-        if 23 <= hour or hour == 0:
+        # 밤 11시30분부터 취침 인사
+        if hour == 23 and minute >= 30:
             if not is_sleeping:
-                # 랜덤 딜레이 (0~60분)
-                await asyncio.sleep(random.randint(0, 3600))
+                await asyncio.sleep(random.randint(0, 1800))
                 try:
                     msg = random.choice(SLEEP_MESSAGES)
                     await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
                     is_sleeping = True
                     logger.info("코인이형 취침!")
                 except Exception as e:
-                    logger.error(f"취침 인사 오류: {e}")
+                    logger.error(f"취침 오류: {e}")
 
-        # 새벽 1시~8시 → 완전 수면 (아무 반응 없음)
-        elif 1 <= hour < 8:
+        # 자정~오전8시 수면
+        elif hour == 0 or (1 <= hour < 8):
             is_sleeping = True
 
-        # 아침 8시~9시 사이 랜덤하게 기상 인사
+        # 오전 8시 기상
         elif hour == 8:
             if is_sleeping:
-                # 랜덤 딜레이 (0~30분)
                 await asyncio.sleep(random.randint(0, 1800))
                 try:
                     msg = random.choice(WAKE_MESSAGES)
@@ -1116,19 +1008,141 @@ async def sleep_wake_scheduler(bot: Bot):
                     is_sleeping = False
                     logger.info("코인이형 기상!")
                 except Exception as e:
-                    logger.error(f"기상 인사 오류: {e}")
+                    logger.error(f"기상 오류: {e}")
         else:
             is_sleeping = False
 
-        await asyncio.sleep(600)  # 10분마다 체크
+        await asyncio.sleep(600)
+
+async def idle_talker(bot: Bot):
+    global last_msg_time
+    await asyncio.sleep(60)
+    while True:
+        await asyncio.sleep(IDLE_CHECK_MINUTES * 60)
+        silent_min = (now_kst() - last_msg_time).seconds // 60
+        now_dt = now_kst()
+        hour   = now_dt.hour
+        minute = now_dt.minute
+        is_sleep_time = (hour == 23 and minute >= 30) or (hour == 0) or (1 <= hour < 8)
+
+        if silent_min >= IDLE_THRESHOLD_MINUTES and not is_sleep_time:
+            try:
+                response = await get_openai_client().chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": IDLE_PERSONA_PROMPT},
+                        {"role": "user",   "content": f"소통방이 {silent_min}분째 조용해. 자연스럽게 먼저 말 걸어줘"},
+                    ],
+                    max_tokens=80,
+                    temperature=1.0,
+                )
+                msg = response.choices[0].message.content.strip()
+                await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
+                last_msg_time = now_kst()
+                logger.info("코인이형 먼저 말 걸기 완료")
+            except Exception as e:
+                logger.error(f"idle 오류: {e}")
+
+async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global last_msg_time
+
+    message = update.message
+    if not message or not message.text:
+        return
+    if str(message.chat_id) != str(GROUP_CHAT_ID):
+        return
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if message.forward_origin or message.sender_chat:
+        return
+
+    # 수면 시간 체크 (밤11시30분~오전8시)
+    now_dt = now_kst()
+    hour   = now_dt.hour
+    minute = now_dt.minute
+    if (hour == 23 and minute >= 30) or (hour == 0) or (1 <= hour < 8):
+        return
+
+    last_msg_time = now_kst()
+    user_text = message.text.strip()
+    user_name = message.from_user.first_name or "회원"
+
+    # DB 저장
+    await save_member(message.from_user.id, user_name, user_text)
+    chat_history.append({"role": "user", "content": f"{user_name}: {user_text}"})
+
+    # 딜레이 7~15초
+    await asyncio.sleep(random.uniform(7, 15))
+
+    # 10% 무시
+    if random.random() < 0.10:
+        return
+
+    try:
+        await context.bot.send_chat_action(
+            chat_id=message.chat_id,
+            action=ChatAction.TYPING
+        )
+        await asyncio.sleep(random.uniform(1, 2))
+
+        # 회원 정보
+        member = await get_member(message.from_user.id)
+        member_info = ""
+        if member and member.get("coins"):
+            member_info = f"\n- {user_name}의 관심 코인: {member['coins']}"
+
+        # 최근 대화 맥락
+        recent_logs = await get_recent_chat_logs(30)
+        db_context  = "\n".join([f"{r['name']}: {r['message']}" for r in recent_logs])
+
+        system_prompt = PERSONA_PROMPT
+        if member_info:
+            system_prompt += f"\n\n[{user_name} 정보]{member_info}"
+        if db_context:
+            system_prompt += f"\n\n[최근 소통방 대화]\n{db_context}"
+
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(list(chat_history))
+
+        response = await get_openai_client().chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=100,
+            temperature=0.9,
+        )
+        reply_text = response.choices[0].message.content.strip()
+
+        chat_history.append({"role": "assistant", "content": reply_text})
+        await save_member(0, "코인이형", reply_text)
+
+        # 관심 코인 자동 저장
+        coin_keywords = ["BTC","ETH","XRP","SOL","BNB","도지","리플","비트","이더","솔라나"]
+        if any(k in user_text.upper() for k in coin_keywords):
+            await update_member_coins(message.from_user.id, user_text[:100])
+
+        # 50% 답글 / 50% 일반
+        if random.random() < 0.5:
+            await message.reply_text(reply_text)
+        else:
+            await context.bot.send_message(
+                chat_id=message.chat_id,
+                text=reply_text
+            )
+
+    except Exception as e:
+        logger.error(f"AI 답변 오류: {e}")
+
+# ──────────────────────────────────────────────
+#  시작
+# ──────────────────────────────────────────────
 
 async def post_init(application):
     await init_db()
     asyncio.create_task(strategy_scheduler(application.bot))
-    asyncio.create_task(idle_talker(application.bot))
-    asyncio.create_task(price_monitor(application.bot))
     asyncio.create_task(morning_briefing(application.bot))
+    asyncio.create_task(issue_monitor(application.bot))
     asyncio.create_task(sleep_wake_scheduler(application.bot))
+    asyncio.create_task(idle_talker(application.bot))
 
 def main():
     logger.info("🚀 코인이형 봇 시작!")

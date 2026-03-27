@@ -352,7 +352,7 @@ def main():
     logger.info("💸 존버킴 봇 시작!")
     app = ApplicationBuilder().token(JONGBUR_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_reply))
-    app.add_handler(MessageHandler(filters.TEXT & filters.IS_BOT, bot_message_reaction))
+    app.add_handler(MessageHandler(filters.ALL, bot_message_reaction))
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":

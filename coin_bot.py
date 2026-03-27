@@ -804,9 +804,9 @@ async def make_issue_image(title: str) -> io.BytesIO:
             transform=ax.transAxes,
             fontsize=13, color='#f0883e',
             ha='center', va='center', fontweight='bold')
-    ax.axhline(y=0.72, xmin=0.05, xmax=0.95,
-               color='#f0883e', linewidth=0.8, alpha=0.5,
-               transform=ax.transAxes)
+    ax.plot([0.05, 0.95], [0.72, 0.72],
+            color='#f0883e', linewidth=0.8, alpha=0.5,
+            transform=ax.transAxes)
     wrapped = textwrap.fill(title, width=45)
     ax.text(0.5, 0.5, wrapped,
             transform=ax.transAxes,

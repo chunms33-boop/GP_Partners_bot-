@@ -919,6 +919,13 @@ async def init_db():
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS answered_messages (
+                    message_id  BIGINT PRIMARY KEY,
+                    bot_name    TEXT,
+                    created_at  TIMESTAMP DEFAULT NOW()
+                )
+            """)
         logger.info("DB 초기화 완료!")
     except Exception as e:
         logger.error(f"DB 초기화 오류: {e}")
@@ -968,6 +975,59 @@ async def update_member_coins(user_id: int, coins: str):
             )
     except Exception as e:
         logger.error(f"회원 업데이트 오류: {e}")
+
+
+
+async def claim_message(message_id: int, bot_name: str) -> bool:
+    """메시지 답변권 선점 시도 - 성공하면 True"""
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute("""
+                INSERT INTO answered_messages (message_id, bot_name)
+                VALUES ($1, $2)
+                ON CONFLICT (message_id) DO NOTHING
+            """, message_id, bot_name)
+            # INSERT가 실제로 됐으면 True (0 rows affected면 False)
+            return result == "INSERT 0 1"
+    except Exception as e:
+        logger.error(f"claim 오류: {e}")
+        return False
+
+async def is_answered(message_id: int) -> bool:
+    """이 메시지 이미 답변됐는지 체크"""
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM answered_messages WHERE message_id = $1", message_id
+            )
+        return row is not None
+    except Exception as e:
+        logger.error(f"answered 체크 오류: {e}")
+        return False
+
+async def mark_answered(message_id: int, bot_name: str):
+    """이 메시지 답변됨으로 표시"""
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO answered_messages (message_id, bot_name)
+                VALUES ($1, $2)
+                ON CONFLICT (message_id) DO NOTHING
+            """, message_id, bot_name)
+            # 오래된 기록 삭제 (1000개 초과시)
+            await conn.execute("""
+                DELETE FROM answered_messages
+                WHERE id IN (
+                    SELECT id FROM answered_messages
+                    ORDER BY created_at DESC
+                    OFFSET 1000
+                )
+            """)
+    except Exception as e:
+        logger.error(f"answered 표시 오류: {e}")
 
 async def get_recent_chat_logs(limit: int = 30) -> list:
     try:
@@ -1097,6 +1157,17 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if random.random() < 0.10:
         return
 
+    # 랜덤 딜레이 후 선점 시도 (코인이형: 7~15초)
+    await asyncio.sleep(random.uniform(7, 15))
+
+    # 다른 봇이 이미 답변했으면 스킵
+    if await is_answered(message.message_id):
+        return
+
+    # 답변권 선점 시도
+    if not await claim_message(message.message_id, "코인이형"):
+        return
+
     try:
         await context.bot.send_chat_action(
             chat_id=message.chat_id,
@@ -1126,7 +1197,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = await get_openai_client().chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            max_tokens=100,
+            max_tokens=60,
             temperature=0.9,
         )
         reply_text = response.choices[0].message.content.strip()
@@ -1150,6 +1221,75 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ──────────────────────────────────────────────
 #  시작
 # ──────────────────────────────────────────────
+
+
+async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """다른 봇 메시지에 가끔 끼어들기"""
+    message = update.message
+    if not message or not message.text:
+        return
+    if str(message.chat_id) != str(GROUP_CHAT_ID):
+        return
+
+    # 봇 메시지에만 반응
+    if not message.from_user or not message.from_user.is_bot:
+        return
+
+    # 코인이형 자신 메시지는 무시
+    if message.from_user.id == context.bot.id:
+        return
+
+    # 수면 시간 체크
+    now_dt = now_kst()
+    hour = now_dt.hour
+    minute = now_dt.minute
+    if (hour == 23 and minute >= 30) or (hour == 0) or (1 <= hour < 8):
+        return
+
+    # 25% 확률로만 반응
+    if random.random() > 0.25:
+        return
+
+    user_text = message.text.strip()
+
+    # 딜레이 (더 늦게 반응)
+    await asyncio.sleep(random.uniform(10, 25))
+
+    try:
+        await context.bot.send_chat_action(
+            chat_id=message.chat_id,
+            action=ChatAction.TYPING
+        )
+        await asyncio.sleep(random.uniform(1, 2))
+
+        recent_logs = await get_recent_chat_logs(20)
+        db_context = "\n".join([f"{r['name']}: {r['message']}" for r in recent_logs])
+
+        bot_reaction_prompt = PERSONA_PROMPT + """
+
+[지금 상황]
+소통방에서 다른 멤버가 방금 말했어
+자연스럽게 끼어들거나 공감하거나 살짝 태클 걸어
+아주 짧게 1줄로만
+"""
+        if db_context:
+            bot_reaction_prompt += f"\n[최근 대화]\n{db_context}"
+
+        response = await get_openai_client().chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": bot_reaction_prompt},
+                {"role": "user", "content": f"방금 소통방에서 이런 말이 나왔어: {user_text}"},
+            ],
+            max_tokens=80,
+            temperature=0.95,
+        )
+        reply = response.choices[0].message.content.strip()
+        await save_member(0, "코인이형", reply)
+        await context.bot.send_message(chat_id=message.chat_id, text=reply)
+
+    except Exception as e:
+        logger.error(f"봇 반응 오류: {e}")
 
 async def post_init(application):
     await init_db()

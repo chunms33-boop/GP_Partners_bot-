@@ -748,7 +748,10 @@ async def fetch_coin_news():
     for url in feeds:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:10]:
+            feed_count = 0
+            for entry in feed.entries[:5]:
+                if feed_count >= 2:  # 피드당 최대 2개
+                    break
                 news_id = hashlib.md5(entry.get("link","").encode()).hexdigest()
                 if news_id not in sent_issue_ids:
                     articles.append({
@@ -757,6 +760,7 @@ async def fetch_coin_news():
                         "link":   entry.get("link", ""),
                         "source": feed.feed.get("title", "뉴스"),
                     })
+                    feed_count += 1
         except Exception as e:
             logger.error(f"RSS 오류: {e}")
     return articles
@@ -804,17 +808,21 @@ async def make_issue_image(title: str) -> io.BytesIO:
                           linewidth=2,
                           transform=ax.transAxes)
     ax.add_patch(card)
-    ax.text(0.5, 0.82, "🔥 CRYPTO BREAKING NEWS",
+    ax.text(0.5, 0.82, "CRYPTO BREAKING NEWS",
             transform=ax.transAxes,
             fontsize=13, color='#f0883e',
             ha='center', va='center', fontweight='bold')
     ax.plot([0.05, 0.95], [0.72, 0.72],
             color='#f0883e', linewidth=0.8, alpha=0.5,
             transform=ax.transAxes)
-    wrapped = textwrap.fill(title, width=45)
+    # 제목 영문 변환 처리
+    safe_title = title.encode('ascii', 'ignore').decode('ascii')
+    if not safe_title.strip():
+        safe_title = "Crypto News Alert"
+    wrapped = textwrap.fill(safe_title, width=50)
     ax.text(0.5, 0.5, wrapped,
             transform=ax.transAxes,
-            fontsize=14, color='#f0f6fc',
+            fontsize=13, color='#f0f6fc',
             ha='center', va='center',
             fontweight='bold', linespacing=1.5)
     ax.text(0.5, 0.18,
@@ -831,7 +839,7 @@ async def make_issue_image(title: str) -> io.BytesIO:
 
 async def issue_monitor(bot: Bot):
     global daily_issue_count, last_issue_date
-    await asyncio.sleep(120)
+    await asyncio.sleep(300)  # 시작 후 5분 대기
     while True:
         try:
             # 날짜 바뀌면 카운트 초기화
@@ -839,14 +847,16 @@ async def issue_monitor(bot: Bot):
             if last_issue_date != today:
                 daily_issue_count = 0
                 last_issue_date = today
+                sent_issue_ids.clear()  # 날짜 바뀌면 발송 목록도 초기화
 
-            # 하루 5개 초과시 스킵
+            # 하루 5개 초과시 1시간 대기
             if daily_issue_count >= 5:
-                await asyncio.sleep(60 * 60)
+                await asyncio.sleep(60 * 120)  # 2시간마다 체크
                 continue
 
             articles  = await fetch_coin_news()
-            important = await judge_importance(articles)
+            # 중요도 높은 것만 최대 2개씩만 처리
+            important = (await judge_importance(articles))[:2]
             for article in important:
                 if daily_issue_count >= 5:
                     break
@@ -875,12 +885,12 @@ async def issue_monitor(bot: Bot):
                     )
                     sent_issue_ids.add(article["id"])
                     daily_issue_count += 1
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(30)
                 except Exception as e:
                     logger.error(f"이슈 발송 오류: {e}")
         except Exception as e:
             logger.error(f"이슈 모니터링 오류: {e}")
-        await asyncio.sleep(60 * 60)
+        await asyncio.sleep(60 * 120)  # 2시간마다 체크
 
 # ──────────────────────────────────────────────
 #  DB

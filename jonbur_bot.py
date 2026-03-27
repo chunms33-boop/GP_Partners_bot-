@@ -113,6 +113,45 @@ async def get_db_pool():
         _db_pool = await asyncpg.create_pool(os.environ.get("DATABASE_URL"), ssl="require")
     return _db_pool
 
+
+
+async def claim_message(message_id: int, bot_name: str) -> bool:
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute("""
+                INSERT INTO answered_messages (message_id, bot_name)
+                VALUES ($1, $2)
+                ON CONFLICT (message_id) DO NOTHING
+            """, message_id, bot_name)
+            return result == "INSERT 0 1"
+    except Exception as e:
+        logger.error(f"claim 오류: {e}")
+        return False
+
+async def is_answered(message_id: int) -> bool:
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM answered_messages WHERE message_id = $1", message_id
+            )
+        return row is not None
+    except:
+        return False
+
+async def mark_answered(message_id: int, bot_name: str):
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO answered_messages (message_id, bot_name)
+                VALUES ($1, $2)
+                ON CONFLICT (message_id) DO NOTHING
+            """, message_id, bot_name)
+    except Exception as e:
+        logger.error(f"answered 오류: {e}")
+
 async def save_log(user_id: int, name: str, message: str):
     try:
         pool = await get_db_pool()
@@ -222,9 +261,16 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_log(message.from_user.id, user_name, user_text)
     chat_history.append({"role": "user", "content": f"{user_name}: {user_text}"})
 
-    await asyncio.sleep(random.uniform(25, 30))
-
     if random.random() < 0.50:
+        return
+
+    # 존버킴 딜레이 25~35초 (가장 늦게)
+    await asyncio.sleep(random.uniform(25, 35))
+
+    if await is_answered(message.message_id):
+        return
+
+    if not await claim_message(message.message_id, "존버킴"):
         return
 
     try:
@@ -247,13 +293,56 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_history.append({"role": "assistant", "content": reply})
         await save_log(0, "존버킴", reply)
 
-        if random.random() < 0.5:
-            await message.reply_text(reply)
-        else:
-            await context.bot.send_message(chat_id=message.chat_id, text=reply)
+        await context.bot.send_message(chat_id=message.chat_id, text=reply)
 
     except Exception as e:
         logger.error(f"AI 오류: {e}")
+
+
+async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """다른 봇 말에 가끔 끼어들기"""
+    message = update.message
+    if not message or not message.text:
+        return
+    if str(message.chat_id) != str(GROUP_CHAT_ID):
+        return
+    if not message.from_user or not message.from_user.is_bot:
+        return
+    if message.from_user.id == context.bot.id:
+        return
+
+    hour = now_kst().hour
+    if 1 <= hour < 10:
+        return
+
+    if random.random() > 0.20:
+        return
+
+    await asyncio.sleep(random.uniform(20, 35))
+
+    try:
+        await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+        await asyncio.sleep(random.uniform(1, 2))
+
+        reaction_prompt = JONGBUR_PROMPT + """
+[지금 상황]
+다른 멤버가 방금 말했어
+자연스럽게 끼어들거나 공감하거나 자학개그 해
+음슴체로 1줄만 짧게
+"""
+        r = await get_openai_client().chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": reaction_prompt},
+                {"role": "user", "content": f"방금 이런 말이 나왔어: {message.text}"},
+            ],
+            max_tokens=80, temperature=0.95,
+        )
+        reply = r.choices[0].message.content.strip()
+        await save_log(0, "존버킴", reply)
+        await context.bot.send_message(chat_id=message.chat_id, text=reply)
+    except Exception as e:
+        logger.error(f"봇 반응 오류: {e}")
 
 async def post_init(application):
     asyncio.create_task(sleep_wake_scheduler(application.bot))
@@ -263,6 +352,7 @@ def main():
     logger.info("💸 존버킴 봇 시작!")
     app = ApplicationBuilder().token(JONGBUR_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_reply))
+    app.add_handler(MessageHandler(filters.TEXT & filters.IS_BOT, bot_message_reaction))
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":

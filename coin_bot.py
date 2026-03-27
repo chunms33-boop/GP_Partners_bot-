@@ -1305,9 +1305,6 @@ async def post_init(application):
     await init_db()
     asyncio.create_task(strategy_scheduler(application.bot))
     asyncio.create_task(morning_briefing(application.bot))
-    asyncio.create_task(issue_monitor(application.bot))
-    asyncio.create_task(sleep_wake_scheduler(application.bot))
-    asyncio.create_task(idle_talker(application.bot))
 
 def main():
     logger.info("🚀 코인이형 봇 시작!")
@@ -1316,9 +1313,6 @@ def main():
         .token(TELEGRAM_BOT_TOKEN)
         .post_init(post_init)
         .build()
-    )
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, ai_reply)
     )
     app.run_polling(drop_pending_updates=True)
 

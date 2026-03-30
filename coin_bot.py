@@ -356,25 +356,20 @@ def calc_volume_trend(volumes):
 
 async def get_btc_ohlcv(days=30):
     try:
-        limit = min(days * 6, 200)  # 4시간봉
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            headers={"User-Agent": "Mozilla/5.0"}
+        ) as client:
             r = await client.get(
-                "https://api.bybit.com/v5/market/kline",
-                params={
-                    "symbol": "BTCUSDT",
-                    "interval": "240",
-                    "limit": limit,
-                },
+                "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
+                params={"vs_currency": "usd", "days": str(days)},
                 timeout=15,
             )
             data = r.json()
-        raw = data["result"]["list"]
-        raw = list(reversed(raw))  # 오래된 것부터 정렬
-        times   = [datetime.fromtimestamp(int(d[0])/1000) for d in raw]
-        opens   = [float(d[1]) for d in raw]
-        highs   = [float(d[2]) for d in raw]
-        lows    = [float(d[3]) for d in raw]
-        closes  = [float(d[4]) for d in raw]
+        times   = [datetime.fromtimestamp(d[0]/1000) for d in data]
+        opens   = [float(d[1]) for d in data]
+        highs   = [float(d[2]) for d in data]
+        lows    = [float(d[3]) for d in data]
+        closes  = [float(d[4]) for d in data]
         return times, opens, highs, lows, closes
     except Exception as e:
         logger.error(f"OHLCV 오류: {e}")
@@ -382,16 +377,21 @@ async def get_btc_ohlcv(days=30):
 
 async def get_btc_price():
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            headers={"User-Agent": "Mozilla/5.0"}
+        ) as client:
             r = await client.get(
-                "https://api.bybit.com/v5/market/tickers",
-                params={"category": "spot", "symbol": "BTCUSDT"},
-                timeout=10,
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={
+                    "ids": "bitcoin",
+                    "vs_currencies": "usd",
+                    "include_24hr_change": "true",
+                },
+                timeout=15,
             )
-            data = r.json()
-            ticker = data["result"]["list"][0]
-            price  = float(ticker["lastPrice"])
-            change = round(float(ticker["price24hPcnt"]) * 100, 2)
+            data = r.json()["bitcoin"]
+            price  = float(data["usd"])
+            change = round(float(data["usd_24h_change"]), 2)
             return price, change
     except Exception as e:
         logger.error(f"가격 오류: {e}")

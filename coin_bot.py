@@ -562,6 +562,9 @@ async def generate_strategy(price, change, closes, highs, lows):
     bb_lower = next((v for v in reversed(bb_l) if v is not None), None)
     bb_mid   = next((v for v in reversed(bb_m) if v is not None), None)
     bb_pos   = "상단 근접" if bb_upper and price > bb_upper * 0.98 else "하단 근접" if bb_lower and price < bb_lower * 1.02 else "중앙 구간"
+    bb_up_str  = f'${bb_upper:,.0f}' if bb_upper else 'N/A'
+    bb_lo_str  = f'${bb_lower:,.0f}' if bb_lower else 'N/A'
+    bb_mid_str = f'${bb_mid:,.0f}'   if bb_mid   else 'N/A'
 
     fib = calc_fibonacci(closes)
     r1, r2, s1, s2 = calc_support_resistance(closes, highs, lows)
@@ -571,6 +574,8 @@ async def generate_strategy(price, change, closes, highs, lows):
     ma7c  = next((v for v in reversed(ma7)  if v is not None), None)
     ma25c = next((v for v in reversed(ma25) if v is not None), None)
     ma_trend = "단기 상승 배열" if (ma7c and ma25c and ma7c > ma25c) else "단기 하락 배열" if (ma7c and ma25c) else "N/A"
+    ma7_str  = f'${ma7c:,.0f}'  if ma7c  else 'N/A'
+    ma25_str = f'${ma25c:,.0f}' if ma25c else 'N/A'
 
     fg_value, fg_label = await get_fear_greed()
     fg_str   = f"{fg_value} — {fg_label}" if fg_value else "N/A"

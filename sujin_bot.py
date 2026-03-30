@@ -285,7 +285,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msgs.extend(list(chat_history))
 
         r = await get_openai_client().chat.completions.create(
-            model="gpt-4o-mini", messages=msgs, max_tokens=60, temperature=0.9,
+            model="gpt-4o-mini", messages=msgs, max_tokens=40, temperature=0.9,
         )
         reply = r.choices[0].message.content.strip()
         chat_history.append({"role": "assistant", "content": reply})

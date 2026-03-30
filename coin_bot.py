@@ -4,7 +4,7 @@
 
   [채널 기능]
   - 매일 오전 9시: 크립토 모닝 브리핑
-  - 4시간마다: BTC 스윙투자 전략 (오전9시~새벽2시)
+  - 4시간마다: BTC 투자 전략 (오전9시~새벽2시)
   - 중요 코인 이슈: 이미지 + AI 요약 (하루 최대 5개)
 
   [소통방 기능]
@@ -356,18 +356,23 @@ def calc_volume_trend(volumes):
 
 async def get_btc_ohlcv(days=30):
     try:
+        limit = min(days * 24, 1000)  # 1시간봉
         async with httpx.AsyncClient() as client:
             r = await client.get(
-                "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
-                params={"vs_currency": "usd", "days": str(days)},
+                "https://api.binance.com/api/v3/klines",
+                params={
+                    "symbol": "BTCUSDT",
+                    "interval": "4h",
+                    "limit": limit,
+                },
                 timeout=15,
             )
             data = r.json()
         times   = [datetime.fromtimestamp(d[0]/1000) for d in data]
-        opens   = [d[1] for d in data]
-        highs   = [d[2] for d in data]
-        lows    = [d[3] for d in data]
-        closes  = [d[4] for d in data]
+        opens   = [float(d[1]) for d in data]
+        highs   = [float(d[2]) for d in data]
+        lows    = [float(d[3]) for d in data]
+        closes  = [float(d[4]) for d in data]
         return times, opens, highs, lows, closes
     except Exception as e:
         logger.error(f"OHLCV 오류: {e}")
@@ -377,17 +382,14 @@ async def get_btc_price():
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={
-                    "ids": "bitcoin",
-                    "vs_currencies": "usd",
-                    "include_24hr_change": "true",
-                    "include_24hr_vol": "true",
-                },
+                "https://api.binance.com/api/v3/ticker/24hr",
+                params={"symbol": "BTCUSDT"},
                 timeout=10,
             )
-            data = r.json()["bitcoin"]
-            return data["usd"], round(data["usd_24h_change"], 2)
+            data = r.json()
+            price  = float(data["lastPrice"])
+            change = round(float(data["priceChangePercent"]), 2)
+            return price, change
     except Exception as e:
         logger.error(f"가격 오류: {e}")
         return None, None
@@ -479,7 +481,7 @@ def make_chart(times, closes, highs, lows):
     ax1.text(0, closes[-1], f'${closes[-1]:,.0f} ', color='#f0f6fc',
              fontsize=9, va='center', ha='right', fontweight='bold')
 
-    ax1.set_title('BTC/USDT  |  스윙투자 분석 차트',
+    ax1.set_title('BTC/USDT  |  투자 분석 차트',
                   color='#f0f6fc', fontsize=12, pad=8, fontweight='bold')
     ax1.legend(loc='upper left', fontsize=7, facecolor='#161b22',
                edgecolor='#21262d', labelcolor='#8b949e')
@@ -578,7 +580,7 @@ async def generate_strategy(price, change, closes, highs, lows):
 
     prompt = f"""
 너는 10년 경력의 전문 크립토 스윙 트레이더야
-아래 실시간 데이터를 분석해서 실전에서 바로 쓸 수 있는 스윙 투자 전략을 써줘
+아래 실시간 데이터를 분석해서 실전에서 바로 쓸 수 있는 투자 전략을 써줘
 일반 투자자도 쉽게 이해할 수 있게 깔끔하게 정리해줘
 
 [실시간 데이터]
@@ -595,7 +597,7 @@ MACD: {macd_str} / Signal: {sig_str} / {macd_signal}
 숏청산 밀집: ${key_liq2:,.0f} ~ ${short_liq:,.0f}
 
 [출력 형식 - 정확히 이 형식으로]
-📊 BTC 스윙투자 전략  {now_kst().strftime('%m/%d %H:%M')} KST
+📊 BTC 투자 전략  {now_kst().strftime('%m/%d %H:%M')} KST
 
 💰 현재가  ${price:,.0f}  {change:+.2f}%
 
@@ -626,7 +628,7 @@ MACD: {macd_str} / Signal: {sig_str} / {macd_signal}
 • 숏청산  ${key_liq2:,.0f} ~ ${short_liq:,.0f}
 
 ─────────────────────
-🎯 스윙 전략 (참고용)
+🎯 매매 전략 (참고용)
 ─────────────────────
 • 지지선  (가격대 — 이유 한줄)
 • 저항선  (가격대 — 이유 한줄)
@@ -659,7 +661,7 @@ MACD: {macd_str} / Signal: {sig_str} / {macd_signal}
 # ──────────────────────────────────────────────
 
 async def post_trading_strategy(bot: Bot):
-    """BTC 스윙투자 전략 포스팅 (새벽2시~오전9시 정지)"""
+    """BTC 투자 전략 포스팅 (새벽2시~오전9시 정지)"""
     try:
         hour = now_kst().hour
         if 2 <= hour < 9:

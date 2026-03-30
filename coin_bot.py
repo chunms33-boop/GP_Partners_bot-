@@ -590,8 +590,8 @@ async def generate_strategy(price, change, closes, highs, lows):
 현재가: ${price:,.0f}  24h변동: {change:+.2f}%
 RSI(14): {rsi_str}
 MACD: {macd_str} / Signal: {sig_str} / {macd_signal}
-볼린저밴드: 상단 ${bb_upper:,.0f if bb_upper else 0} / 중앙 ${bb_mid:,.0f if bb_mid else 0} / 하단 ${bb_lower:,.0f if bb_lower else 0} / 위치: {bb_pos}
-이동평균: MA7 ${ma7c:,.0f if ma7c else 0} / MA25 ${ma25c:,.0f if ma25c else 0} / {ma_trend}
+볼린저밴드: 상단 {bb_up_str} / 중앙 {bb_mid_str} / 하단 {bb_lo_str} / 위치: {bb_pos}
+이동평균: MA7 {ma7_str} / MA25 {ma25_str} / {ma_trend}
 피보나치 38.2%: ${fib['38.2%']:,.0f} / 50%: ${fib['50%']:,.0f} / 61.8%: ${fib['61.8%']:,.0f}
 피벗 저항1: ${r1:,.0f} / 저항2: ${r2:,.0f}
 피벗 지지1: ${s1:,.0f} / 지지2: ${s2:,.0f}

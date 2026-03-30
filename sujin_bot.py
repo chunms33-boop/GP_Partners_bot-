@@ -291,10 +291,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_history.append({"role": "assistant", "content": reply})
         await save_log(0, "박수진", reply)
 
-        if random.random() < 0.5:
-            await message.reply_text(reply)
-        else:
-            await context.bot.send_message(chat_id=message.chat_id, text=reply)
+        await context.bot.send_message(chat_id=message.chat_id, text=reply)
 
     except Exception as e:
         logger.error(f"AI 오류: {e}")

@@ -356,23 +356,25 @@ def calc_volume_trend(volumes):
 
 async def get_btc_ohlcv(days=30):
     try:
-        limit = min(days * 24, 1000)  # 1시간봉
+        limit = min(days * 6, 200)  # 4시간봉
         async with httpx.AsyncClient() as client:
             r = await client.get(
-                "https://api.binance.com/api/v3/klines",
+                "https://api.bybit.com/v5/market/kline",
                 params={
                     "symbol": "BTCUSDT",
-                    "interval": "4h",
+                    "interval": "240",
                     "limit": limit,
                 },
                 timeout=15,
             )
             data = r.json()
-        times   = [datetime.fromtimestamp(d[0]/1000) for d in data]
-        opens   = [float(d[1]) for d in data]
-        highs   = [float(d[2]) for d in data]
-        lows    = [float(d[3]) for d in data]
-        closes  = [float(d[4]) for d in data]
+        raw = data["result"]["list"]
+        raw = list(reversed(raw))  # 오래된 것부터 정렬
+        times   = [datetime.fromtimestamp(int(d[0])/1000) for d in raw]
+        opens   = [float(d[1]) for d in raw]
+        highs   = [float(d[2]) for d in raw]
+        lows    = [float(d[3]) for d in raw]
+        closes  = [float(d[4]) for d in raw]
         return times, opens, highs, lows, closes
     except Exception as e:
         logger.error(f"OHLCV 오류: {e}")
@@ -382,13 +384,14 @@ async def get_btc_price():
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(
-                "https://api.binance.com/api/v3/ticker/24hr",
-                params={"symbol": "BTCUSDT"},
+                "https://api.bybit.com/v5/market/tickers",
+                params={"category": "spot", "symbol": "BTCUSDT"},
                 timeout=10,
             )
             data = r.json()
-            price  = float(data["lastPrice"])
-            change = round(float(data["priceChangePercent"]), 2)
+            ticker = data["result"]["list"][0]
+            price  = float(ticker["lastPrice"])
+            change = round(float(ticker["price24hPcnt"]) * 100, 2)
             return price, change
     except Exception as e:
         logger.error(f"가격 오류: {e}")

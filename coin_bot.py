@@ -365,46 +365,96 @@ def calc_volume_trend(volumes):
 # ──────────────────────────────────────────────
 
 async def get_btc_ohlcv(days=30):
+    # 1차: CoinGecko
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(
+                headers={"User-Agent": "Mozilla/5.0"}
+            ) as client:
+                r = await client.get(
+                    "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
+                    params={"vs_currency": "usd", "days": str(days)},
+                    timeout=15,
+                )
+                if r.status_code == 429:
+                    logger.warning(f"CoinGecko OHLCV 429 재시도 ({attempt+1}/3)")
+                    await asyncio.sleep(15 * (attempt + 1))
+                    continue
+                data = r.json()
+                times  = [datetime.fromtimestamp(d[0]/1000) for d in data]
+                opens  = [float(d[1]) for d in data]
+                highs  = [float(d[2]) for d in data]
+                lows   = [float(d[3]) for d in data]
+                closes = [float(d[4]) for d in data]
+                return times, opens, highs, lows, closes
+        except Exception as e:
+            logger.error(f"CoinGecko OHLCV 오류: {e}")
+            await asyncio.sleep(5)
+
+    # 2차: Kraken OHLC
     try:
-        async with httpx.AsyncClient(
-            headers={"User-Agent": "Mozilla/5.0"}
-        ) as client:
+        async with httpx.AsyncClient() as client:
             r = await client.get(
-                "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
-                params={"vs_currency": "usd", "days": str(days)},
+                "https://api.kraken.com/0/public/OHLC",
+                params={"pair": "XBTUSD", "interval": 240},
                 timeout=15,
             )
-            data = r.json()
-        times   = [datetime.fromtimestamp(d[0]/1000) for d in data]
-        opens   = [float(d[1]) for d in data]
-        highs   = [float(d[2]) for d in data]
-        lows    = [float(d[3]) for d in data]
-        closes  = [float(d[4]) for d in data]
+            data = r.json()["result"]["XXBTZUSD"]
+        times  = [datetime.fromtimestamp(d[0]) for d in data]
+        opens  = [float(d[1]) for d in data]
+        highs  = [float(d[2]) for d in data]
+        lows   = [float(d[3]) for d in data]
+        closes = [float(d[4]) for d in data]
+        logger.info("Kraken OHLCV 조회 성공")
         return times, opens, highs, lows, closes
     except Exception as e:
-        logger.error(f"OHLCV 오류: {e}")
+        logger.error(f"Kraken OHLCV 오류: {e}")
         return None, None, None, None, None
 
 async def get_btc_price():
+    # 1차: CoinGecko
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(
+                headers={"User-Agent": "Mozilla/5.0"}
+            ) as client:
+                r = await client.get(
+                    "https://api.coingecko.com/api/v3/simple/price",
+                    params={
+                        "ids": "bitcoin",
+                        "vs_currencies": "usd",
+                        "include_24hr_change": "true",
+                    },
+                    timeout=15,
+                )
+                if r.status_code == 429:
+                    logger.warning(f"CoinGecko 429 대기 후 재시도 ({attempt+1}/3)")
+                    await asyncio.sleep(10 * (attempt + 1))
+                    continue
+                data = r.json()["bitcoin"]
+                price  = float(data["usd"])
+                change = round(float(data["usd_24h_change"]), 2)
+                return price, change
+        except Exception as e:
+            logger.error(f"CoinGecko 가격 오류: {e}")
+            await asyncio.sleep(5)
+
+    # 2차: Kraken (한국 접속 가능)
     try:
-        async with httpx.AsyncClient(
-            headers={"User-Agent": "Mozilla/5.0"}
-        ) as client:
+        async with httpx.AsyncClient() as client:
             r = await client.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={
-                    "ids": "bitcoin",
-                    "vs_currencies": "usd",
-                    "include_24hr_change": "true",
-                },
+                "https://api.kraken.com/0/public/Ticker",
+                params={"pair": "XBTUSD"},
                 timeout=15,
             )
-            data = r.json()["bitcoin"]
-            price  = float(data["usd"])
-            change = round(float(data["usd_24h_change"]), 2)
+            data = r.json()["result"]["XXBTZUSD"]
+            price  = float(data["c"][0])
+            open_p = float(data["o"])
+            change = round((price - open_p) / open_p * 100, 2)
+            logger.info("Kraken API로 가격 조회 성공")
             return price, change
     except Exception as e:
-        logger.error(f"가격 오류: {e}")
+        logger.error(f"Kraken 가격 오류: {e}")
         return None, None
 
 async def get_fear_greed():

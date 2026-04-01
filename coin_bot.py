@@ -166,35 +166,45 @@ IDLE_PERSONA_PROMPT = """
 
 MORNING_BRIEF_PROMPT = """
 너는 크립토 시장 전문 애널리스트야
-매일 아침 크립토 시장 브리핑을 아래 형식으로 작성해줘
-실제 간밤 시장 상황을 바탕으로 핵심만 정리해줘
+매일 아침 시장 주요 현안과 이달 경제지표 일정을 포함한 브리핑을 HTML 형식으로 작성해줘
 
-[형식]
-━━━━━━━━━━━━━━━━━
-🌅 크립토 모닝 브리핑
+[출력 형식 - HTML 태그 사용 반드시 이 형식으로]
+🌅 <b>크립토 모닝 브리핑</b>
 {date} 오전 9시
-━━━━━━━━━━━━━━━━━
 
-📊 간밤 시장 요약
-• BTC {btc_price} ({btc_change}%)
-• 전반적 분위기 한줄
+📊 <b>간밤 시장 현황</b>
+• BTC  <b>{btc_price}</b>  ({btc_change}%)
+• (전반적 시장 분위기 한줄)
 
-🔥 주목 이슈 3가지
-① 이슈 제목 — 한줄 설명
-② 이슈 제목 — 한줄 설명
-③ 이슈 제목 — 한줄 설명
+🔥 <b>오늘의 주요 현안</b>
+① <b>(현안 제목)</b>
+   → (내용 및 시장 영향 한줄)
+② <b>(현안 제목)</b>
+   → (내용 및 시장 영향 한줄)
+③ <b>(현안 제목)</b>
+   → (내용 및 시장 영향 한줄)
 
-📌 오늘의 핵심 관전 포인트
-• 주목할 가격대나 이벤트
+🌐 <b>매크로 변수 체크</b>
+• (달러/금리/증시 동향 한줄)
+• (크립토 시장 영향 한줄)
 
-⚠️ 본 브리핑은 참고용이며 투자 판단은 본인 책임
-━━━━━━━━━━━━━━━━━
+📅 <b>이달 주요 경제지표 일정</b>
+<i>(크립토 영향도 높은 순 / 지난 일정은 취소선 처리)</i>
+<s>MM/DD  🇺🇸 (지표명) — (결과 한줄)</s>
+<s>MM/DD  🇺🇸 (지표명) — (결과 한줄)</s>
+MM/DD  🇺🇸 <b>(오늘 또는 예정 지표명)</b>
+MM/DD  🇺🇸 (예정 지표명)
+MM/DD  🇺🇸 (예정 지표명)
+
+⚠️ <i>본 브리핑은 참고용이며 투자 판단은 본인 책임</i>
 
 [규칙]
 마침표 금지
-깔끔하고 보기 좋게
-실제 시장 흐름 반영
-전체 20줄 이내
+HTML 태그 정확히 사용 (<b> <i> <s> 태그만)
+지난 날짜 지표는 반드시 <s>취소선</s> 처리
+오늘 날짜 지표는 <b>굵게</b> 강조
+FOMC 금리결정 CPI PCE GDP 고용지표 위주로
+전체 30줄 이내
 """
 
 ISSUE_JUDGE_PROMPT = """
@@ -698,9 +708,28 @@ async def post_trading_strategy(bot: Bot):
         logger.error(f"전략 포스팅 오류: {e}")
 
 async def strategy_scheduler(bot: Bot):
+    """매일 11:50, 18:50 고정 발송"""
+    target_times = [(11, 50), (18, 50)]
     while True:
+        now = now_kst()
+        # 다음 발송 시간 계산
+        next_target = None
+        for hour, minute in target_times:
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if now < target:
+                next_target = target
+                break
+        if next_target is None:
+            # 오늘 발송 시간 모두 지남 → 내일 첫 번째 시간
+            from datetime import timedelta
+            tomorrow = now + timedelta(days=1)
+            h, m = target_times[0]
+            next_target = tomorrow.replace(hour=h, minute=m, second=0, microsecond=0)
+
+        wait_sec = (next_target - now).total_seconds()
+        logger.info(f"다음 전략 발송: {next_target.strftime('%H:%M')} (대기 {wait_sec/60:.0f}분)")
+        await asyncio.sleep(wait_sec)
         await post_trading_strategy(bot)
-        await asyncio.sleep(STRATEGY_INTERVAL_MINUTES * 60)
 
 async def morning_briefing(bot: Bot):
     """매일 오전 9시 크립토 브리핑"""
@@ -733,6 +762,7 @@ async def morning_briefing(bot: Bot):
             await bot.send_message(
                 chat_id=NEWS_CHANNEL_ID,
                 text=response.choices[0].message.content.strip(),
+                parse_mode="HTML",
             )
             logger.info("모닝 브리핑 발송 완료")
 

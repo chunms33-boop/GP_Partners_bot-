@@ -205,6 +205,7 @@ HTML 태그 정확히 사용 (<b> <i> <s> 태그만)
 오늘 날짜 지표는 <b>굵게</b> 강조
 FOMC 금리결정 CPI PCE GDP 고용지표 위주로
 전체 30줄 이내
+코드블록 절대 금지 (```html 등 사용 금지)
 """
 
 ISSUE_JUDGE_PROMPT = """
@@ -745,6 +746,7 @@ async def post_trading_strategy(bot: Bot):
             return
 
         strategy = await generate_strategy(price, change, closes, highs, lows)
+        strategy = strategy.replace("```html", "").replace("```", "").strip()
         chart    = make_chart(times, closes, highs, lows)
 
         await bot.send_photo(
@@ -809,9 +811,11 @@ async def morning_briefing(bot: Bot):
                 max_tokens=600,
                 temperature=0.7,
             )
+            text = response.choices[0].message.content.strip()
+            text = text.replace("```html", "").replace("```", "").strip()
             await bot.send_message(
                 chat_id=NEWS_CHANNEL_ID,
-                text=response.choices[0].message.content.strip(),
+                text=text,
                 parse_mode="HTML",
             )
             logger.info("모닝 브리핑 발송 완료")

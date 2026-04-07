@@ -760,26 +760,14 @@ async def post_trading_strategy(bot: Bot):
         logger.error(f"전략 포스팅 오류: {e}")
 
 async def strategy_scheduler(bot: Bot):
-    """매일 11:50, 18:50 고정 발송"""
-    target_times = [(11, 50), (18, 50)]
+    """매일 11:30 고정 발송 (하루 1번)"""
     while True:
         now = now_kst()
-        # 다음 발송 시간 계산
-        next_target = None
-        for hour, minute in target_times:
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if now < target:
-                next_target = target
-                break
-        if next_target is None:
-            # 오늘 발송 시간 모두 지남 → 내일 첫 번째 시간
-            from datetime import timedelta
-            tomorrow = now + timedelta(days=1)
-            h, m = target_times[0]
-            next_target = tomorrow.replace(hour=h, minute=m, second=0, microsecond=0)
-
-        wait_sec = (next_target - now).total_seconds()
-        logger.info(f"다음 전략 발송: {next_target.strftime('%H:%M')} (대기 {wait_sec/60:.0f}분)")
+        target = now.replace(hour=11, minute=30, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait_sec = (target - now).total_seconds()
+        logger.info(f"다음 전략 발송: {target.strftime('%m/%d %H:%M')} (대기 {wait_sec/60:.0f}분)")
         await asyncio.sleep(wait_sec)
         await post_trading_strategy(bot)
 

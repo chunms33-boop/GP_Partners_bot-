@@ -182,6 +182,8 @@ def get_openai_client():
 chat_history = deque(maxlen=100)
 last_message_time = now_kst()
 is_sleeping = False
+idle_count = 0       # 침묵 중 말 건 횟수
+idle_triggered = False  # 침묵 모드 진입 여부
 
 async def sleep_wake_scheduler(bot: Bot):
     global is_sleeping

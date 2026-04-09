@@ -186,6 +186,8 @@ def get_openai_client():
 chat_history = deque(maxlen=100)
 last_message_time = now_kst()
 is_sleeping = False
+idle_count = 0
+idle_triggered = False
 
 async def sleep_wake_scheduler(bot: Bot):
     global is_sleeping

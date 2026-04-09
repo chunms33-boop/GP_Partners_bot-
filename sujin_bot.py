@@ -215,13 +215,27 @@ async def sleep_wake_scheduler(bot: Bot):
         await asyncio.sleep(600)
 
 async def idle_talker(bot: Bot):
-    global last_message_time
+    global last_message_time, idle_count, idle_triggered
     await asyncio.sleep(60)
     while True:
-        await asyncio.sleep(30 * 60)
-        silent_min = (now_kst() - last_message_time).seconds // 60
+        await asyncio.sleep(20 * 60)  # 20분마다 체크
+        silent_min = int((now_kst() - last_message_time).total_seconds() // 60)
         hour = now_kst().hour
-        if silent_min >= 60 and not (hour == 23 or 0 <= hour < 9):
+        is_sleep = hour == 23 or 0 <= hour < 9
+
+        if is_sleep:
+            idle_count = 0
+            idle_triggered = False
+            continue
+
+        # 회원이 말하면 카운트 초기화
+        if silent_min < 5:
+            idle_count = 0
+            idle_triggered = False
+            continue
+
+        # 1시간 이상 침묵이고 아직 3번 미만
+        if silent_min >= 60 and idle_count < 3:
             try:
                 r = await get_openai_client().chat.completions.create(
                     model="gpt-4o-mini",
@@ -229,13 +243,16 @@ async def idle_talker(bot: Bot):
                         {"role": "system", "content": IDLE_MSG_PROMPT},
                         {"role": "user", "content": f"소통방이 {silent_min}분째 조용해. 자연스럽게 먼저 말 걸어줘"},
                     ],
-                    max_tokens=80, temperature=1.0,
+                    max_tokens=60, temperature=1.0,
                 )
                 msg = r.choices[0].message.content.strip()
                 await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
                 last_message_time = now_kst()
+                idle_count += 1
+                logger.info(f"박수진 idle 말 걸기 ({idle_count}/3)")
             except Exception as e:
                 logger.error(f"idle 오류: {e}")
+        # 3번 다 했으면 조용히 대기
 
 async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_message_time

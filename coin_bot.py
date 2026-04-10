@@ -36,6 +36,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import matplotlib.dates as mdates
+plt.rcParams['axes.unicode_minus'] = False
 from collections import deque
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -538,7 +539,7 @@ def make_chart(times, closes, highs, lows):
     fib_colors = ['#ff7b72','#ffa657','#e3b341','#7ee787','#58a6ff','#bc8cff']
     for (label, level), fc in zip(fib.items(), fib_colors):
         ax1.axhline(y=level, color=fc, linewidth=0.6, alpha=0.5, linestyle=':')
-        ax1.text(n-1, level, f' Fib {label}', color=fc, fontsize=6.5, va='center', alpha=0.8)
+        ax1.text(n-1, level, f' Fib {label}', color=fc, fontsize=6.5, va='center', alpha=0.8, fontfamily='DejaVu Sans')
 
     # 현재가
     ax1.axhline(y=closes[-1], color='#f0f6fc', linewidth=0.8, linestyle='--', alpha=0.6)
@@ -562,7 +563,7 @@ def make_chart(times, closes, highs, lows):
         ax2.axhline(70, color='#da3633', linewidth=0.7, alpha=0.6, linestyle='--')
         ax2.axhline(30, color='#26a641', linewidth=0.7, alpha=0.6, linestyle='--')
         ax2.set_ylim(0, 100)
-        ax2.set_ylabel('RSI', color='#8b949e', fontsize=8)
+        ax2.set_ylabel('RSI(14)', color='#8b949e', fontsize=8)
         ax2.text(xi_rsi[-1], yi_rsi[-1], f' {yi_rsi[-1]:.1f}', color='#f0f6fc', fontsize=8)
 
     # MACD

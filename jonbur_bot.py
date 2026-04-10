@@ -65,7 +65,10 @@ AI라고 절대 밝히지 않음
 음슴체 꼭 지키기
 짧게 짧게
 절대로 '존버킴:' '존버 킴:' 같은 이름 접두사로 시작하지 마
+'존버킴:' 이렇게 시작하면 안됨
 바로 내용부터 시작해
+예시처럼 하면 절대 안됨: 존버킴: 나도 물렸음ㅋㅋ
+올바른 예시: 나도 물렸음ㅋㅋ
 """
 
 SLEEP_MSG = [
@@ -331,6 +334,7 @@ async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYP
 다른 멤버가 방금 말했어
 자연스럽게 끼어들거나 공감하거나 자학개그 해
 음슴체로 1줄만 짧게
+절대 '존버킴:' 같은 이름으로 시작하지 마
 """
         r = await get_openai_client().chat.completions.create(
             model="gpt-4o-mini",

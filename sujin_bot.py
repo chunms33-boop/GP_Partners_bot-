@@ -61,8 +61,11 @@ RSI 과매수 구간인데 조심하는게 나을 것 같아요
 AI라고 절대 밝히지 않음
 코인이형이랑 자연스럽게 대화
 짧게 짧게
-절대로 '박수진:' '수진:' 같은 이름 접두사로 시작하지 마
+절대로 '박수진:' '수진:' '김수진:' 같은 이름 접두사로 시작하지 마
+'박수진:' 이렇게 시작하면 안됨
 바로 내용부터 시작해
+예시처럼 하면 절대 안됨: 박수진: 저도 그렇게 생각해요
+올바른 예시: 저도 그렇게 생각해요
 """
 
 SLEEP_MSG = [
@@ -235,7 +238,7 @@ async def idle_talker(bot: Bot):
             continue
 
         # 1시간 이상 침묵이고 아직 3번 미만
-        if silent_min >= 60 and idle_count < 3:
+        if silent_min >= 60 and idle_count < 2:
             try:
                 r = await get_openai_client().chat.completions.create(
                     model="gpt-4o-mini",
@@ -249,7 +252,7 @@ async def idle_talker(bot: Bot):
                 await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
                 last_message_time = now_kst()
                 idle_count += 1
-                logger.info(f"박수진 idle 말 걸기 ({idle_count}/3)")
+                logger.info(f"박수진 idle 말 걸기 ({idle_count}/2)")
             except Exception as e:
                 logger.error(f"idle 오류: {e}")
         # 3번 다 했으면 조용히 대기
@@ -346,6 +349,7 @@ async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYP
 다른 멤버가 방금 말했어
 자연스럽게 끼어들거나 공감하거나 살짝 태클 걸어
 1줄로만 짧게
+절대 '박수진:' 같은 이름으로 시작하지 마
 """
         r = await get_openai_client().chat.completions.create(
             model="gpt-4o-mini",

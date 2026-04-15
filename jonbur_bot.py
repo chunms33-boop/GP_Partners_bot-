@@ -108,6 +108,10 @@ IDLE_MSG_PROMPT = """
 예) 심심한 중임ㅎㅎ BTC나 보는 중
 """
 
+# ──────────────────────────────────────────────
+#  DB
+# ──────────────────────────────────────────────
+
 _db_pool = None
 
 async def get_db_pool():
@@ -115,8 +119,6 @@ async def get_db_pool():
     if _db_pool is None:
         _db_pool = await asyncpg.create_pool(os.environ.get("DATABASE_URL"), ssl="require")
     return _db_pool
-
-
 
 async def claim_message(message_id: int, bot_name: str) -> bool:
     try:
@@ -143,18 +145,6 @@ async def is_answered(message_id: int) -> bool:
     except:
         return False
 
-async def mark_answered(message_id: int, bot_name: str):
-    try:
-        pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO answered_messages (message_id, bot_name)
-                VALUES ($1, $2)
-                ON CONFLICT (message_id) DO NOTHING
-            """, message_id, bot_name)
-    except Exception as e:
-        logger.error(f"answered 오류: {e}")
-
 async def save_log(user_id: int, name: str, message: str):
     try:
         pool = await get_db_pool()
@@ -164,7 +154,10 @@ async def save_log(user_id: int, name: str, message: str):
                 VALUES ($1, $2, NOW())
                 ON CONFLICT (user_id) DO UPDATE SET name=EXCLUDED.name, last_seen=NOW()
             """, user_id, name)
-            await conn.execute("INSERT INTO chat_logs (user_id, name, message) VALUES ($1, $2, $3)", user_id, name, message)
+            await conn.execute(
+                "INSERT INTO chat_logs (user_id, name, message) VALUES ($1, $2, $3)",
+                user_id, name, message
+            )
     except Exception as e:
         logger.error(f"DB 오류: {e}")
 
@@ -186,16 +179,27 @@ async def get_recent_logs(limit=30):
 def get_openai_client():
     return AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-chat_history = deque(maxlen=100)
+# ──────────────────────────────────────────────
+#  전역 상태
+# ──────────────────────────────────────────────
+
+chat_history      = deque(maxlen=100)
 last_message_time = now_kst()
-is_sleeping = False
-idle_count = 0
-idle_triggered = False
+is_sleeping       = False
+
+# idle 시간당 발화 제한용
+idle_hourly_count = 0   # 이번 시간에 몇 번 말했는지
+idle_current_hour = -1  # 마지막으로 카운트한 시(hour)
+
+# ──────────────────────────────────────────────
+#  취침 / 기상 스케줄러
+# ──────────────────────────────────────────────
 
 async def sleep_wake_scheduler(bot: Bot):
     global is_sleeping
     while True:
         hour = now_kst().hour
+
         if hour == 0:
             if not is_sleeping:
                 await asyncio.sleep(random.randint(0, 3600))
@@ -218,33 +222,88 @@ async def sleep_wake_scheduler(bot: Bot):
                     logger.error(f"기상 오류: {e}")
         else:
             is_sleeping = False
+
         await asyncio.sleep(600)
 
+# ──────────────────────────────────────────────
+#  idle 먼저 말 걸기 — 시간당 3번 제한
+# ──────────────────────────────────────────────
+
 async def idle_talker(bot: Bot):
-    global last_message_time
-    await asyncio.sleep(60)
+    """
+    소통방 조용할 때 먼저 말 걸기
+    - 60분 이상 조용할 때만 발화
+    - 1시간 내 최대 3번 → 3번 채우면 그 시간엔 완전 침묵
+    """
+    global last_message_time, idle_hourly_count, idle_current_hour
+
+    await asyncio.sleep(60)  # 봇 시작 후 1분 대기
+
     while True:
-        await asyncio.sleep(30 * 60)
-        silent_min = (now_kst() - last_message_time).seconds // 60
-        hour = now_kst().hour
-        if silent_min >= 60 and not (1 <= hour < 10):
-            try:
-                r = await get_openai_client().chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": IDLE_MSG_PROMPT},
-                        {"role": "user", "content": f"소통방이 {silent_min}분째 조용해. 자연스럽게 먼저 말 걸어줘"},
-                    ],
-                    max_tokens=80, temperature=1.0,
-                )
-                msg = r.choices[0].message.content.strip()
-                await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
-                last_message_time = now_kst()
-            except Exception as e:
-                logger.error(f"idle 오류: {e}")
+        await asyncio.sleep(30 * 60)  # 30분마다 체크
+
+        now_dt = now_kst()
+        hour   = now_dt.hour
+
+        # ── 취침 시간이면 패스 ──
+        is_sleep_time = (hour == 0) or (1 <= hour < 10)
+        if is_sleep_time:
+            continue
+
+        # ── 시간(hour) 바뀌면 카운터 초기화 ──
+        if idle_current_hour != hour:
+            idle_hourly_count = 0
+            idle_current_hour = hour
+            logger.info(f"[존버 idle] {hour}시 카운터 초기화")
+
+        # ── 이번 시간에 3번 이상 말했으면 조용히 ──
+        if idle_hourly_count >= 3:
+            logger.info(f"[존버 idle] {hour}시 발화 한도(3번) 도달 → 대기")
+            continue
+
+        # ── 소통방이 60분 이상 조용한지 확인 ──
+        silent_min = int((now_kst() - last_message_time).total_seconds() // 60)
+        if silent_min < 60:
+            logger.info(f"[존버 idle] 아직 조용하지 않음 ({silent_min}분 경과)")
+            continue
+
+        # ── 조건 충족 → 먼저 말 걸기 ──
+        try:
+            r = await get_openai_client().chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": IDLE_MSG_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"소통방이 {silent_min}분째 조용해. "
+                            f"이번 시간에 이미 {idle_hourly_count}번 말했어. "
+                            "자연스럽게 먼저 말 걸어줘"
+                        ),
+                    },
+                ],
+                max_tokens=80,
+                temperature=1.0,
+            )
+            msg = r.choices[0].message.content.strip()
+            await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
+
+            # 카운터 & 시간 갱신
+            idle_hourly_count += 1
+            last_message_time  = now_kst()
+
+            logger.info(f"[존버 idle] 말 걸기 완료 ({hour}시 {idle_hourly_count}/3번)")
+
+        except Exception as e:
+            logger.error(f"[존버 idle] 오류: {e}")
+
+# ──────────────────────────────────────────────
+#  AI 답변
+# ──────────────────────────────────────────────
 
 async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_message_time
+
     message = update.message
     if not message or not message.text:
         return
@@ -269,12 +328,10 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if random.random() < 0.50:
         return
 
-    # 존버킴 딜레이 25~35초 (가장 늦게)
     await asyncio.sleep(random.uniform(25, 35))
 
     if await is_answered(message.message_id):
         return
-
     if not await claim_message(message.message_id, "존버킴"):
         return
 
@@ -282,8 +339,8 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
         await asyncio.sleep(random.uniform(1, 3))
 
-        recent = await get_recent_logs(30)
-        db_ctx = "\n".join([f"{r['name']}: {r['message']}" for r in recent])
+        recent    = await get_recent_logs(30)
+        db_ctx    = "\n".join([f"{r['name']}: {r['message']}" for r in recent])
         sys_prompt = JONGBUR_PROMPT
         if db_ctx:
             sys_prompt += f"\n\n[최근 소통방 대화]\n{db_ctx}"
@@ -297,15 +354,16 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = r.choices[0].message.content.strip()
         chat_history.append({"role": "assistant", "content": reply})
         await save_log(0, "존버킴", reply)
-
         await context.bot.send_message(chat_id=message.chat_id, text=reply)
 
     except Exception as e:
         logger.error(f"AI 오류: {e}")
 
+# ──────────────────────────────────────────────
+#  봇 메시지 반응
+# ──────────────────────────────────────────────
 
 async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """다른 봇 말에 가끔 끼어들기"""
     message = update.message
     if not message or not message.text:
         return
@@ -319,7 +377,6 @@ async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYP
     hour = now_kst().hour
     if 1 <= hour < 10:
         return
-
     if random.random() > 0.20:
         return
 
@@ -330,6 +387,7 @@ async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYP
         await asyncio.sleep(random.uniform(1, 2))
 
         reaction_prompt = JONGBUR_PROMPT + """
+
 [지금 상황]
 다른 멤버가 방금 말했어
 자연스럽게 끼어들거나 공감하거나 자학개그 해
@@ -349,6 +407,10 @@ async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYP
         await context.bot.send_message(chat_id=message.chat_id, text=reply)
     except Exception as e:
         logger.error(f"봇 반응 오류: {e}")
+
+# ──────────────────────────────────────────────
+#  시작
+# ──────────────────────────────────────────────
 
 async def post_init(application):
     asyncio.create_task(sleep_wake_scheduler(application.bot))

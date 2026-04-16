@@ -1,2 +1,0 @@
-[build]
-buildCommand = "apt-get install -y fonts-nanum fontconfig && fc-cache -fv && pip install -r requirements.txt"

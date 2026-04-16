@@ -1,12 +1,16 @@
 """
 박수진 봇 — 코인 5년차 직장인 투자자
 딜레이 10~20초 / 70% 답변
-밤 11시~새벽 1시 취침 / 아침 8시 기상
+밤 10시30분~오전 9시 취침
 """
 
 import os, asyncio, logging, random, asyncpg
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from openai import AsyncOpenAI
 from telegram import Update, Bot
@@ -19,6 +23,27 @@ def now_kst():
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ── 한글 폰트 설정 ──────────────────────────────
+def setup_korean_font():
+    candidates = [
+        '/usr/share/fonts/truetype/nanum/NanumGothic.ttf',
+        '/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf',
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf',
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            font_manager.fontManager.addfont(path)
+            prop = font_manager.FontProperties(fname=path)
+            plt.rcParams['font.family'] = prop.get_name()
+            plt.rcParams['axes.unicode_minus'] = False
+            logger.info(f"한글 폰트 적용: {prop.get_name()}")
+            return
+    plt.rcParams['axes.unicode_minus'] = False
+    logger.warning("한글 폰트 없음 — 기본 폰트 사용")
+
+setup_korean_font()
 
 SUJIN_BOT_TOKEN = os.environ.get("SUJIN_BOT_TOKEN")
 OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY")
@@ -62,10 +87,7 @@ AI라고 절대 밝히지 않음
 코인이형이랑 자연스럽게 대화
 짧게 짧게
 절대로 '박수진:' '수진:' '김수진:' 같은 이름 접두사로 시작하지 마
-'박수진:' 이렇게 시작하면 안됨
 바로 내용부터 시작해
-예시처럼 하면 절대 안됨: 박수진: 저도 그렇게 생각해요
-올바른 예시: 저도 그렇게 생각해요
 """
 
 SLEEP_MSG = [
@@ -115,6 +137,26 @@ async def get_db_pool():
     if _db_pool is None:
         _db_pool = await asyncpg.create_pool(os.environ.get("DATABASE_URL"), ssl="require")
     return _db_pool
+
+async def get_last_chat_time():
+    """
+    DB에서 실제 마지막 메시지 시간 조회
+    → 봇이 잠든 사이 온 메시지도 정확히 감지
+    """
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT created_at FROM chat_logs ORDER BY created_at DESC LIMIT 1"
+            )
+        if row and row['created_at']:
+            dt = row['created_at']
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(KST)
+    except Exception as e:
+        logger.error(f"마지막 채팅 시간 조회 오류: {e}")
+    return now_kst()
 
 async def claim_message(message_id: int, bot_name: str) -> bool:
     try:
@@ -180,15 +222,12 @@ def get_openai_client():
 # ──────────────────────────────────────────────
 
 chat_history      = deque(maxlen=100)
-last_message_time = now_kst()
 is_sleeping       = False
-
-# idle 시간당 발화 제한용
-idle_hourly_count = 0   # 이번 시간에 몇 번 말했는지
-idle_current_hour = -1  # 마지막으로 카운트한 시(hour)
+idle_hourly_count = 0
+idle_current_hour = -1
 
 # ──────────────────────────────────────────────
-#  취침 / 기상 스케줄러
+#  취침 / 기상
 # ──────────────────────────────────────────────
 
 async def sleep_wake_scheduler(bot: Bot):
@@ -224,18 +263,19 @@ async def sleep_wake_scheduler(bot: Bot):
         await asyncio.sleep(600)
 
 # ──────────────────────────────────────────────
-#  idle 먼저 말 걸기 — 시간당 3번 제한
+#  idle 먼저 말 걸기 — DB 기반 + 시간당 3번 제한
 # ──────────────────────────────────────────────
 
 async def idle_talker(bot: Bot):
     """
-    소통방 조용할 때 먼저 말 걸기
-    - 60분 이상 조용할 때만 발화
-    - 1시간 내 최대 3번 → 3번 채우면 그 시간엔 완전 침묵
+    핵심 수정:
+    - last_message_time(메모리) 대신 DB chat_logs에서 실제 마지막 시간 조회
+    - 봇이 잠든 사이 회원이 말해도 정확히 감지
+    - 1시간에 최대 3번 발화 후 침묵
     """
-    global last_message_time, idle_hourly_count, idle_current_hour
+    global idle_hourly_count, idle_current_hour
 
-    await asyncio.sleep(60)  # 봇 시작 후 1분 대기
+    await asyncio.sleep(60)
 
     while True:
         await asyncio.sleep(20 * 60)  # 20분마다 체크
@@ -244,7 +284,7 @@ async def idle_talker(bot: Bot):
         hour   = now_dt.hour
         minute = now_dt.minute
 
-        # ── 취침 시간이면 패스 ──
+        # 취침 시간이면 패스
         is_sleep_time = (
             (hour == 22 and minute >= 30)
             or hour == 23
@@ -253,24 +293,26 @@ async def idle_talker(bot: Bot):
         if is_sleep_time:
             continue
 
-        # ── 시간(hour) 바뀌면 카운터 초기화 ──
+        # 시간 바뀌면 카운터 초기화
         if idle_current_hour != hour:
             idle_hourly_count = 0
             idle_current_hour = hour
             logger.info(f"[수진 idle] {hour}시 카운터 초기화")
 
-        # ── 이번 시간에 3번 이상 말했으면 조용히 ──
+        # 3번 다 했으면 침묵
         if idle_hourly_count >= 3:
             logger.info(f"[수진 idle] {hour}시 발화 한도(3번) 도달 → 대기")
             continue
 
-        # ── 소통방이 60분 이상 조용한지 확인 ──
-        silent_min = int((now_kst() - last_message_time).total_seconds() // 60)
+        # ★ DB에서 실제 마지막 채팅 시간 가져오기
+        last_chat  = await get_last_chat_time()
+        silent_min = int((now_kst() - last_chat).total_seconds() // 60)
+
         if silent_min < 60:
-            logger.info(f"[수진 idle] 아직 조용하지 않음 ({silent_min}분 경과)")
+            logger.info(f"[수진 idle] 조용하지 않음 ({silent_min}분 경과) → 패스")
             continue
 
-        # ── 조건 충족 → 먼저 말 걸기 ──
+        # 조건 충족 → 말 걸기
         try:
             r = await get_openai_client().chat.completions.create(
                 model="gpt-4o-mini",
@@ -290,11 +332,9 @@ async def idle_talker(bot: Bot):
             )
             msg = r.choices[0].message.content.strip()
             await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
+            await save_log(0, "박수진", msg)  # DB에도 기록 → 다른 봇도 감지 가능
 
-            # 카운터 & 시간 갱신
             idle_hourly_count += 1
-            last_message_time  = now_kst()
-
             logger.info(f"[수진 idle] 말 걸기 완료 ({hour}시 {idle_hourly_count}/3번)")
 
         except Exception as e:
@@ -305,8 +345,6 @@ async def idle_talker(bot: Bot):
 # ──────────────────────────────────────────────
 
 async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global last_message_time
-
     message = update.message
     if not message or not message.text:
         return
@@ -322,10 +360,10 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if hour == 23 or (0 <= hour < 9):
         return
 
-    last_message_time = now_kst()
     user_text = message.text.strip()
     user_name = message.from_user.first_name or "회원"
 
+    # ★ 메시지 올 때마다 DB에 저장 (idle_talker가 정확히 감지하도록)
     await save_log(message.from_user.id, user_name, user_text)
     chat_history.append({"role": "user", "content": f"{user_name}: {user_text}"})
 
@@ -390,14 +428,7 @@ async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYP
         await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
         await asyncio.sleep(random.uniform(1, 2))
 
-        reaction_prompt = SUJIN_PROMPT + """
-
-[지금 상황]
-다른 멤버가 방금 말했어
-자연스럽게 끼어들거나 공감하거나 살짝 태클 걸어
-1줄로만 짧게
-절대 '박수진:' 같은 이름으로 시작하지 마
-"""
+        reaction_prompt = SUJIN_PROMPT + "\n[지금 상황]\n다른 멤버가 방금 말했어\n자연스럽게 끼어들거나 공감하거나 살짝 태클 걸어\n1줄로만 짧게\n절대 '박수진:' 같은 이름으로 시작하지 마"
         r = await get_openai_client().chat.completions.create(
             model="gpt-4o-mini",
             messages=[

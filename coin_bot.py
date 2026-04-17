@@ -33,6 +33,16 @@ import httpx
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
+# 한글 폰트 설정
+import os
+from matplotlib import font_manager
+
+_font_path = os.path.join(os.path.dirname(__file__), 'NanumGothic.ttf')
+if os.path.exists(_font_path):
+    font_manager.fontManager.addfont(_font_path)
+    _prop = font_manager.FontProperties(fname=_font_path)
+    plt.rcParams['font.family'] = _prop.get_name()
+plt.rcParams['axes.unicode_minus'] = False
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import matplotlib.dates as mdates

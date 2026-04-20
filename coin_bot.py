@@ -4,13 +4,13 @@
 
   [채널 기능]
   - 매일 오전 9시: 크립토 모닝 브리핑
-  - 4시간마다: BTC 투자 전략 (오전9시~새벽2시)
+  - 매일 11:30: BTC 투자 전략
   - 중요 코인 이슈: 이미지 + AI 요약 (하루 최대 5개)
 
   [소통방 기능]
   - 코인이형 AI 대화 (밤11시30분~오전8시 취침)
   - 회원 기억 DB
-  - 30분 조용하면 먼저 말 걸기
+  - 60분 조용하면 먼저 말 걸기 (시간당 최대 3번)
   - 취침/기상 인사
 
   [설정]
@@ -28,28 +28,28 @@ import random
 import asyncpg
 import feedparser
 import hashlib
-import json
 import httpx
 import numpy as np
 
-# ── matplotlib 임포트 (순서 중요!) ──────────────
+# ── matplotlib (순서 중요: plt 먼저 import 후 폰트 설정) ──
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt          # ← plt 먼저 import
+import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import matplotlib.dates as mdates
 from matplotlib import font_manager
 
-# ── 한글 폰트 설정 (plt import 이후에!) ─────────
+# ── 한글 폰트 설정 (plt import 이후에 실행) ──────────────
 _font_path = os.path.join(os.path.dirname(__file__), 'NanumGothic.ttf')
 if os.path.exists(_font_path):
     font_manager.fontManager.addfont(_font_path)
     _prop = font_manager.FontProperties(fname=_font_path)
     plt.rcParams['font.family'] = _prop.get_name()
+    logging.getLogger(__name__).info(f"한글 폰트 적용: {_prop.get_name()}")
 plt.rcParams['axes.unicode_minus'] = False
 
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from openai import AsyncOpenAI
 from telegram import Update, Bot
@@ -80,9 +80,8 @@ OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY")
 NEWS_CHANNEL_ID    = os.environ.get("NEWS_CHANNEL_ID")
 GROUP_CHAT_ID      = os.environ.get("GROUP_CHAT_ID")
 
-STRATEGY_INTERVAL_MINUTES = 240
-IDLE_CHECK_MINUTES        = 15
-IDLE_THRESHOLD_MINUTES    = 60
+IDLE_CHECK_MINUTES    = 15
+IDLE_THRESHOLD_MINUTES = 60
 
 # ──────────────────────────────────────────────
 #  코인이형 페르소나
@@ -128,10 +127,6 @@ AI라고 절대 밝히지 않음
 1줄로 짧게
 이름 접두사로 시작하지 마
 """
-
-# ──────────────────────────────────────────────
-#  취침/기상 멘트
-# ──────────────────────────────────────────────
 
 SLEEP_MESSAGES = [
     "나 오늘 좀 피곤해서 먼저 들어갈게ㅋㅋ 내일 봐요",
@@ -302,10 +297,7 @@ def calc_macd(prices, fast=12, slow=26, signal=9):
         return result
     ema_fast  = ema(prices, fast)
     ema_slow  = ema(prices, slow)
-    macd_line = [
-        (f - s) if f and s else None
-        for f, s in zip(ema_fast, ema_slow)
-    ]
+    macd_line = [(f - s) if f and s else None for f, s in zip(ema_fast, ema_slow)]
     valid = [(i, v) for i, v in enumerate(macd_line) if v is not None]
     signal_line = [None] * len(prices)
     if len(valid) >= signal:
@@ -314,10 +306,7 @@ def calc_macd(prices, fast=12, slow=26, signal=9):
         for idx, (orig_i, _) in enumerate(valid):
             if sig[idx] is not None:
                 signal_line[orig_i] = sig[idx]
-    histogram = [
-        (m - s) if m and s else None
-        for m, s in zip(macd_line, signal_line)
-    ]
+    histogram = [(m - s) if m and s else None for m, s in zip(macd_line, signal_line)]
     return macd_line, signal_line, histogram
 
 def calc_bollinger(prices, period=20, std_dev=2):
@@ -357,18 +346,6 @@ def calc_support_resistance(closes, highs, lows):
     s2 = pivot - (recent_high - recent_low)
     return r1, r2, s1, s2
 
-def calc_volume_trend(volumes):
-    if not volumes or len(volumes) < 5:
-        return "N/A"
-    avg_recent = sum(volumes[-5:]) / 5
-    avg_prev   = sum(volumes[-10:-5]) / 5 if len(volumes) >= 10 else avg_recent
-    if avg_recent > avg_prev * 1.2:
-        return "증가 (강한 관심)"
-    elif avg_recent < avg_prev * 0.8:
-        return "감소 (관망세)"
-    else:
-        return "보합"
-
 # ──────────────────────────────────────────────
 #  실시간 데이터
 # ──────────────────────────────────────────────
@@ -376,9 +353,7 @@ def calc_volume_trend(volumes):
 async def get_btc_ohlcv(days=30):
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(
-                headers={"User-Agent": "Mozilla/5.0"}
-            ) as client:
+            async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as client:
                 r = await client.get(
                     "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
                     params={"vs_currency": "usd", "days": str(days)},
@@ -397,7 +372,6 @@ async def get_btc_ohlcv(days=30):
         except Exception as e:
             logger.error(f"CoinGecko OHLCV 오류: {e}")
             await asyncio.sleep(5)
-
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(
@@ -419,41 +393,27 @@ async def get_btc_ohlcv(days=30):
 async def get_btc_price():
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(
-                headers={"User-Agent": "Mozilla/5.0"}
-            ) as client:
+            async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as client:
                 r = await client.get(
                     "https://api.coingecko.com/api/v3/simple/price",
-                    params={
-                        "ids": "bitcoin",
-                        "vs_currencies": "usd",
-                        "include_24hr_change": "true",
-                    },
+                    params={"ids": "bitcoin", "vs_currencies": "usd", "include_24hr_change": "true"},
                     timeout=15,
                 )
                 if r.status_code == 429:
                     await asyncio.sleep(10 * (attempt + 1))
                     continue
                 data = r.json()["bitcoin"]
-                price  = float(data["usd"])
-                change = round(float(data["usd_24h_change"]), 2)
-                return price, change
+                return float(data["usd"]), round(float(data["usd_24h_change"]), 2)
         except Exception as e:
             logger.error(f"CoinGecko 가격 오류: {e}")
             await asyncio.sleep(5)
-
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(
-                "https://api.kraken.com/0/public/Ticker",
-                params={"pair": "XBTUSD"},
-                timeout=15,
-            )
+            r = await client.get("https://api.kraken.com/0/public/Ticker", params={"pair": "XBTUSD"}, timeout=15)
             data = r.json()["result"]["XXBTZUSD"]
             price  = float(data["c"][0])
             open_p = float(data["o"])
-            change = round((price - open_p) / open_p * 100, 2)
-            return price, change
+            return price, round((price - open_p) / open_p * 100, 2)
     except Exception as e:
         logger.error(f"Kraken 가격 오류: {e}")
         return None, None
@@ -461,19 +421,13 @@ async def get_btc_price():
 async def get_fear_greed():
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(
-                "https://api.alternative.me/fng/?limit=1",
-                timeout=10
-            )
+            r = await client.get("https://api.alternative.me/fng/?limit=1", timeout=10)
             data = r.json()
             value = data["data"][0]["value"]
             label = data["data"][0]["value_classification"]
             label_kr = {
-                "Extreme Fear": "극도의 공포",
-                "Fear": "공포",
-                "Neutral": "중립",
-                "Greed": "탐욕",
-                "Extreme Greed": "극도의 탐욕"
+                "Extreme Fear": "극도의 공포", "Fear": "공포", "Neutral": "중립",
+                "Greed": "탐욕", "Extreme Greed": "극도의 탐욕"
             }.get(label, label)
             return int(value), label_kr
     except Exception as e:
@@ -499,7 +453,6 @@ def make_chart(times, closes, highs, lows):
             spine.set_edgecolor('#21262d')
 
     n = len(times)
-
     for i in range(n):
         color = '#26a641' if closes[i] >= (closes[i-1] if i > 0 else closes[i]) else '#da3633'
         ax1.plot([i, i], [lows[i], highs[i]], color=color, linewidth=0.8, alpha=0.7)
@@ -510,11 +463,7 @@ def make_chart(times, closes, highs, lows):
     ma7  = calc_ma(closes, 7)
     ma25 = calc_ma(closes, 25)
     ma99 = calc_ma(closes, min(99, n-1))
-    for ma, color, label in [
-        (ma7,  '#f0883e', 'MA7'),
-        (ma25, '#58a6ff', 'MA25'),
-        (ma99, '#bc8cff', 'MA99'),
-    ]:
+    for ma, color, label in [(ma7, '#f0883e', 'MA7'), (ma25, '#58a6ff', 'MA25'), (ma99, '#bc8cff', 'MA99')]:
         xi = [i for i, v in enumerate(ma) if v is not None]
         yi = [v for v in ma if v is not None]
         if xi:
@@ -525,10 +474,7 @@ def make_chart(times, closes, highs, lows):
     if xi_bb:
         ax1.plot(xi_bb, [bb_upper[i] for i in xi_bb], color='#e3b341', linewidth=0.8, alpha=0.6, linestyle='--')
         ax1.plot(xi_bb, [bb_lower[i] for i in xi_bb], color='#e3b341', linewidth=0.8, alpha=0.6, linestyle='--')
-        ax1.fill_between(xi_bb,
-                         [bb_upper[i] for i in xi_bb],
-                         [bb_lower[i] for i in xi_bb],
-                         alpha=0.04, color='#e3b341')
+        ax1.fill_between(xi_bb, [bb_upper[i] for i in xi_bb], [bb_lower[i] for i in xi_bb], alpha=0.04, color='#e3b341')
 
     fib = calc_fibonacci(closes)
     fib_colors = ['#ff7b72','#ffa657','#e3b341','#7ee787','#58a6ff','#bc8cff']
@@ -537,13 +483,9 @@ def make_chart(times, closes, highs, lows):
         ax1.text(n-1, level, f' Fib {label}', color=fc, fontsize=6.5, va='center', alpha=0.8)
 
     ax1.axhline(y=closes[-1], color='#f0f6fc', linewidth=0.8, linestyle='--', alpha=0.6)
-    ax1.text(0, closes[-1], f'${closes[-1]:,.0f} ', color='#f0f6fc',
-             fontsize=9, va='center', ha='right', fontweight='bold')
-
-    ax1.set_title('BTC/USDT  |  투자 분석 차트',
-                  color='#f0f6fc', fontsize=12, pad=8, fontweight='bold')
-    ax1.legend(loc='upper left', fontsize=7, facecolor='#161b22',
-               edgecolor='#21262d', labelcolor='#8b949e')
+    ax1.text(0, closes[-1], f'${closes[-1]:,.0f} ', color='#f0f6fc', fontsize=9, va='center', ha='right', fontweight='bold')
+    ax1.set_title('BTC/USDT  |  투자 분석 차트', color='#f0f6fc', fontsize=12, pad=8, fontweight='bold')
+    ax1.legend(loc='upper left', fontsize=7, facecolor='#161b22', edgecolor='#21262d', labelcolor='#8b949e')
     ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
 
     rsi = calc_rsi(closes)
@@ -572,18 +514,14 @@ def make_chart(times, closes, highs, lows):
         ax3.plot(xi_s, [signal_line[i] for i in xi_s], color='#f0883e', linewidth=1.2, label='Signal')
     ax3.axhline(0, color='#8b949e', linewidth=0.5, alpha=0.5)
     ax3.set_ylabel('MACD', color='#8b949e', fontsize=8)
-    ax3.legend(loc='upper left', fontsize=7, facecolor='#161b22',
-               edgecolor='#21262d', labelcolor='#8b949e')
+    ax3.legend(loc='upper left', fontsize=7, facecolor='#161b22', edgecolor='#21262d', labelcolor='#8b949e')
 
     tick_step = max(1, n // 6)
     tick_pos  = list(range(0, n, tick_step))
     for ax in [ax1, ax2, ax3]:
         ax.set_xlim(-1, n)
         ax.set_xticks(tick_pos)
-        ax.set_xticklabels(
-            [times[i].strftime('%m/%d') for i in tick_pos],
-            color='#8b949e', fontsize=7
-        )
+        ax.set_xticklabels([times[i].strftime('%m/%d') for i in tick_pos], color='#8b949e', fontsize=7)
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -593,7 +531,7 @@ def make_chart(times, closes, highs, lows):
     return buf
 
 # ──────────────────────────────────────────────
-#  전문 트레이더 전략 생성
+#  전략 생성
 # ──────────────────────────────────────────────
 
 def get_openai_client():
@@ -622,9 +560,8 @@ async def generate_strategy(price, change, closes, highs, lows):
 
     fib = calc_fibonacci(closes)
     r1, r2, s1, s2 = calc_support_resistance(closes, highs, lows)
-
-    ma7   = calc_ma(closes, 7)
-    ma25  = calc_ma(closes, 25)
+    ma7  = calc_ma(closes, 7)
+    ma25 = calc_ma(closes, 25)
     ma7c  = next((v for v in reversed(ma7)  if v is not None), None)
     ma25c = next((v for v in reversed(ma25) if v is not None), None)
     ma_trend = "단기 상승 배열" if (ma7c and ma25c and ma7c > ma25c) else "단기 하락 배열" if (ma7c and ma25c) else "N/A"
@@ -706,17 +643,13 @@ MACD: {macd_str} / Signal: {sig_str} / {macd_signal}
 """
     response = await get_openai_client().chat.completions.create(
         model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user",   "content": "지금 바로 분석 포스팅 써줘"},
-        ],
-        max_tokens=700,
-        temperature=0.6,
+        messages=[{"role": "system", "content": prompt}, {"role": "user", "content": "지금 바로 분석 포스팅 써줘"}],
+        max_tokens=700, temperature=0.6,
     )
     return response.choices[0].message.content.strip()
 
 # ──────────────────────────────────────────────
-#  채널 포스팅 스케줄러
+#  채널 스케줄러
 # ──────────────────────────────────────────────
 
 async def post_trading_strategy(bot: Bot):
@@ -724,26 +657,17 @@ async def post_trading_strategy(bot: Bot):
         hour = now_kst().hour
         if 2 <= hour < 9:
             return
-
         price, change = await get_btc_price()
         if not price:
             return
-
         times, opens, highs, lows, closes = await get_btc_ohlcv(days=30)
         if not closes:
             return
-
         strategy = await generate_strategy(price, change, closes, highs, lows)
         strategy = strategy.replace("```html", "").replace("```", "").strip()
         chart    = make_chart(times, closes, highs, lows)
-
-        await bot.send_photo(
-            chat_id=NEWS_CHANNEL_ID,
-            photo=chart,
-            caption=strategy,
-        )
+        await bot.send_photo(chat_id=NEWS_CHANNEL_ID, photo=chart, caption=strategy)
         logger.info(f"전략 포스팅 완료 — BTC ${price:,.0f}")
-
     except Exception as e:
         logger.error(f"전략 포스팅 오류: {e}")
 
@@ -753,8 +677,7 @@ async def strategy_scheduler(bot: Bot):
         target = now.replace(hour=11, minute=30, second=0, microsecond=0)
         if now >= target:
             target += timedelta(days=1)
-        wait_sec = (target - now).total_seconds()
-        await asyncio.sleep(wait_sec)
+        await asyncio.sleep((target - now).total_seconds())
         await post_trading_strategy(bot)
 
 async def morning_briefing(bot: Bot):
@@ -765,11 +688,9 @@ async def morning_briefing(bot: Bot):
             if n >= target:
                 target += timedelta(days=1)
             await asyncio.sleep((target - n).total_seconds())
-
             price, change = await get_btc_price()
             if not price:
                 continue
-
             prompt = MORNING_BRIEF_PROMPT.format(
                 date=now_kst().strftime("%Y년 %m월 %d일"),
                 btc_price=f"${price:,.0f}",
@@ -777,28 +698,18 @@ async def morning_briefing(bot: Bot):
             )
             response = await get_openai_client().chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user",   "content": "오늘 아침 브리핑 작성해줘"},
-                ],
-                max_tokens=600,
-                temperature=0.7,
+                messages=[{"role": "system", "content": prompt}, {"role": "user", "content": "오늘 아침 브리핑 작성해줘"}],
+                max_tokens=600, temperature=0.7,
             )
-            text = response.choices[0].message.content.strip()
-            text = text.replace("```html", "").replace("```", "").strip()
-            await bot.send_message(
-                chat_id=NEWS_CHANNEL_ID,
-                text=text,
-                parse_mode="HTML",
-            )
+            text = response.choices[0].message.content.strip().replace("```html", "").replace("```", "").strip()
+            await bot.send_message(chat_id=NEWS_CHANNEL_ID, text=text, parse_mode="HTML")
             logger.info("모닝 브리핑 발송 완료")
-
         except Exception as e:
             logger.error(f"브리핑 오류: {e}")
             await asyncio.sleep(3600)
 
 # ──────────────────────────────────────────────
-#  중요 이슈 모니터링
+#  이슈 모니터링
 # ──────────────────────────────────────────────
 
 sent_issue_ids = set()
@@ -821,12 +732,7 @@ async def fetch_coin_news():
                     break
                 news_id = hashlib.md5(entry.get("link","").encode()).hexdigest()
                 if news_id not in sent_issue_ids:
-                    articles.append({
-                        "id":     news_id,
-                        "title":  entry.get("title", ""),
-                        "link":   entry.get("link", ""),
-                        "source": feed.feed.get("title", "뉴스"),
-                    })
+                    articles.append({"id": news_id, "title": entry.get("title", ""), "link": entry.get("link", ""), "source": feed.feed.get("title", "뉴스")})
                     feed_count += 1
         except Exception as e:
             logger.error(f"RSS 오류: {e}")
@@ -839,12 +745,8 @@ async def judge_importance(articles):
     try:
         response = await get_openai_client().chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": ISSUE_JUDGE_PROMPT},
-                {"role": "user",   "content": titles},
-            ],
-            max_tokens=200,
-            temperature=0.3,
+            messages=[{"role": "system", "content": ISSUE_JUDGE_PROMPT}, {"role": "user", "content": titles}],
+            max_tokens=200, temperature=0.3,
         )
         result = response.choices[0].message.content.strip()
         important = []
@@ -868,34 +770,20 @@ async def make_issue_image(title: str) -> io.BytesIO:
     fig.patch.set_facecolor('#0d1117')
     ax.set_facecolor('#0d1117')
     ax.axis('off')
-    card = FancyBboxPatch((0.02, 0.1), 0.96, 0.8,
-                          boxstyle="round,pad=0.02",
-                          facecolor='#161b22',
-                          edgecolor='#f0883e',
-                          linewidth=2,
-                          transform=ax.transAxes)
+    card = FancyBboxPatch((0.02, 0.1), 0.96, 0.8, boxstyle="round,pad=0.02",
+                          facecolor='#161b22', edgecolor='#f0883e', linewidth=2, transform=ax.transAxes)
     ax.add_patch(card)
-    ax.text(0.5, 0.82, "CRYPTO BREAKING NEWS",
-            transform=ax.transAxes,
-            fontsize=13, color='#f0883e',
-            ha='center', va='center', fontweight='bold')
-    ax.plot([0.05, 0.95], [0.72, 0.72],
-            color='#f0883e', linewidth=0.8, alpha=0.5,
-            transform=ax.transAxes)
+    ax.text(0.5, 0.82, "CRYPTO BREAKING NEWS", transform=ax.transAxes,
+            fontsize=13, color='#f0883e', ha='center', va='center', fontweight='bold')
+    ax.plot([0.05, 0.95], [0.72, 0.72], color='#f0883e', linewidth=0.8, alpha=0.5, transform=ax.transAxes)
     wrapped = textwrap.fill(title, width=30)
-    ax.text(0.5, 0.5, wrapped,
-            transform=ax.transAxes,
-            fontsize=13, color='#f0f6fc',
-            ha='center', va='center',
-            fontweight='bold', linespacing=1.5)
-    ax.text(0.5, 0.18,
-            now_kst().strftime("%Y.%m.%d %H:%M KST"),
-            transform=ax.transAxes,
-            fontsize=10, color='#8b949e', ha='center')
+    ax.text(0.5, 0.5, wrapped, transform=ax.transAxes,
+            fontsize=13, color='#f0f6fc', ha='center', va='center', fontweight='bold', linespacing=1.5)
+    ax.text(0.5, 0.18, now_kst().strftime("%Y.%m.%d %H:%M KST"),
+            transform=ax.transAxes, fontsize=10, color='#8b949e', ha='center')
     plt.tight_layout()
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150,
-                facecolor=fig.get_facecolor(), bbox_inches='tight')
+    plt.savefig(buf, format='png', dpi=150, facecolor=fig.get_facecolor(), bbox_inches='tight')
     buf.seek(0)
     plt.close()
     return buf
@@ -910,11 +798,9 @@ async def issue_monitor(bot: Bot):
                 daily_issue_count = 0
                 last_issue_date = today
                 sent_issue_ids.clear()
-
             if daily_issue_count >= 5:
                 await asyncio.sleep(60 * 120)
                 continue
-
             articles  = await fetch_coin_news()
             important = (await judge_importance(articles))[:2]
             for article in important:
@@ -923,26 +809,14 @@ async def issue_monitor(bot: Bot):
                 try:
                     response = await get_openai_client().chat.completions.create(
                         model="gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": ISSUE_SUMMARY_PROMPT},
-                            {"role": "user",   "content": f"제목: {article['title']}\n링크: {article['link']}"},
-                        ],
-                        max_tokens=300,
-                        temperature=0.6,
+                        messages=[{"role": "system", "content": ISSUE_SUMMARY_PROMPT},
+                                  {"role": "user", "content": f"제목: {article['title']}\n링크: {article['link']}"}],
+                        max_tokens=300, temperature=0.6,
                     )
                     summary = response.choices[0].message.content.strip()
                     image   = await make_issue_image(article["title"])
-                    caption = (
-                        f"{summary}\n\n"
-                        f"🔗 <a href='{article['link']}'>원문 보기</a>\n"
-                        f"📡 출처: {article['source']}"
-                    )
-                    await bot.send_photo(
-                        chat_id=NEWS_CHANNEL_ID,
-                        photo=image,
-                        caption=caption,
-                        parse_mode="HTML",
-                    )
+                    caption = f"{summary}\n\n🔗 <a href='{article['link']}'>원문 보기</a>\n📡 출처: {article['source']}"
+                    await bot.send_photo(chat_id=NEWS_CHANNEL_ID, photo=image, caption=caption, parse_mode="HTML")
                     sent_issue_ids.add(article["id"])
                     daily_issue_count += 1
                     await asyncio.sleep(30)
@@ -961,11 +835,23 @@ _db_pool = None
 async def get_db_pool():
     global _db_pool
     if _db_pool is None:
-        _db_pool = await asyncpg.create_pool(
-            os.environ.get("DATABASE_URL"),
-            ssl="require"
-        )
+        _db_pool = await asyncpg.create_pool(os.environ.get("DATABASE_URL"), ssl="require")
     return _db_pool
+
+async def get_last_chat_time():
+    """DB에서 실제 마지막 메시지 시간 조회 (봇이 잠든 사이 메시지도 감지)"""
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT created_at FROM chat_logs ORDER BY created_at DESC LIMIT 1")
+        if row and row['created_at']:
+            dt = row['created_at']
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(KST)
+    except Exception as e:
+        logger.error(f"마지막 채팅 시간 조회 오류: {e}")
+    return now_kst()
 
 async def init_db():
     try:
@@ -1017,19 +903,12 @@ async def save_member(user_id: int, name: str, message: str):
             await conn.execute("""
                 INSERT INTO members (user_id, name, last_seen)
                 VALUES ($1, $2, NOW())
-                ON CONFLICT (user_id) DO UPDATE
-                SET name = EXCLUDED.name, last_seen = NOW()
+                ON CONFLICT (user_id) DO UPDATE SET name = EXCLUDED.name, last_seen = NOW()
             """, user_id, name)
+            await conn.execute("INSERT INTO chat_logs (user_id, name, message) VALUES ($1, $2, $3)", user_id, name, message)
             await conn.execute("""
-                INSERT INTO chat_logs (user_id, name, message)
-                VALUES ($1, $2, $3)
-            """, user_id, name, message)
-            await conn.execute("""
-                DELETE FROM chat_logs
-                WHERE id IN (
-                    SELECT id FROM chat_logs
-                    ORDER BY created_at DESC
-                    OFFSET 200
+                DELETE FROM chat_logs WHERE id IN (
+                    SELECT id FROM chat_logs ORDER BY created_at DESC OFFSET 200
                 )
             """)
     except Exception as e:
@@ -1039,10 +918,7 @@ async def update_member_coins(user_id: int, coins: str):
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE members SET coins = $1 WHERE user_id = $2",
-                coins, user_id
-            )
+            await conn.execute("UPDATE members SET coins = $1 WHERE user_id = $2", coins, user_id)
     except Exception as e:
         logger.error(f"회원 업데이트 오류: {e}")
 
@@ -1052,8 +928,7 @@ async def claim_message(message_id: int, bot_name: str) -> bool:
         async with pool.acquire() as conn:
             result = await conn.execute("""
                 INSERT INTO answered_messages (message_id, bot_name)
-                VALUES ($1, $2)
-                ON CONFLICT (message_id) DO NOTHING
+                VALUES ($1, $2) ON CONFLICT (message_id) DO NOTHING
             """, message_id, bot_name)
             return result == "INSERT 0 1"
     except Exception as e:
@@ -1064,33 +939,11 @@ async def is_answered(message_id: int) -> bool:
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT 1 FROM answered_messages WHERE message_id = $1", message_id
-            )
+            row = await conn.fetchrow("SELECT 1 FROM answered_messages WHERE message_id = $1", message_id)
         return row is not None
     except Exception as e:
         logger.error(f"answered 체크 오류: {e}")
         return False
-
-async def mark_answered(message_id: int, bot_name: str):
-    try:
-        pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO answered_messages (message_id, bot_name)
-                VALUES ($1, $2)
-                ON CONFLICT (message_id) DO NOTHING
-            """, message_id, bot_name)
-            await conn.execute("""
-                DELETE FROM answered_messages
-                WHERE id IN (
-                    SELECT id FROM answered_messages
-                    ORDER BY created_at DESC
-                    OFFSET 1000
-                )
-            """)
-    except Exception as e:
-        logger.error(f"answered 표시 오류: {e}")
 
 async def get_recent_chat_logs(limit: int = 30) -> list:
     try:
@@ -1098,10 +951,8 @@ async def get_recent_chat_logs(limit: int = 30) -> list:
         async with pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT name, message FROM (
-                    SELECT name, message, created_at
-                    FROM chat_logs
-                    ORDER BY created_at DESC
-                    LIMIT $1
+                    SELECT name, message, created_at FROM chat_logs
+                    ORDER BY created_at DESC LIMIT $1
                 ) sub ORDER BY created_at ASC
             """, limit)
         return [dict(r) for r in rows]
@@ -1110,14 +961,11 @@ async def get_recent_chat_logs(limit: int = 30) -> list:
         return []
 
 # ──────────────────────────────────────────────
-#  소통방 코인이형
+#  소통방
 # ──────────────────────────────────────────────
 
-chat_history    = deque(maxlen=100)
-last_msg_time   = now_kst()
-is_sleeping     = False
-
-# idle 시간당 발화 제한
+chat_history      = deque(maxlen=100)
+is_sleeping       = False
 idle_hourly_count = 0
 idle_current_hour = -1
 
@@ -1132,8 +980,7 @@ async def sleep_wake_scheduler(bot: Bot):
             if not is_sleeping:
                 await asyncio.sleep(random.randint(0, 1800))
                 try:
-                    msg = random.choice(SLEEP_MESSAGES)
-                    await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
+                    await bot.send_message(chat_id=GROUP_CHAT_ID, text=random.choice(SLEEP_MESSAGES))
                     is_sleeping = True
                     logger.info("코인이형 취침!")
                 except Exception as e:
@@ -1144,8 +991,7 @@ async def sleep_wake_scheduler(bot: Bot):
             if is_sleeping:
                 await asyncio.sleep(random.randint(0, 1800))
                 try:
-                    msg = random.choice(WAKE_MESSAGES)
-                    await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
+                    await bot.send_message(chat_id=GROUP_CHAT_ID, text=random.choice(WAKE_MESSAGES))
                     is_sleeping = False
                     logger.info("코인이형 기상!")
                 except Exception as e:
@@ -1156,8 +1002,16 @@ async def sleep_wake_scheduler(bot: Bot):
         await asyncio.sleep(600)
 
 async def idle_talker(bot: Bot):
-    global last_msg_time, idle_hourly_count, idle_current_hour
+    """
+    ★ 핵심 수정:
+    - DB에서 실제 마지막 메시지 시간 조회 (잠든 사이 메시지도 정확히 감지)
+    - 시간(hour) 바뀌면 카운터 초기화
+    - 시간당 최대 3번 발화 후 완전 침묵
+    """
+    global idle_hourly_count, idle_current_hour
+
     await asyncio.sleep(60)
+
     while True:
         await asyncio.sleep(IDLE_CHECK_MINUTES * 60)
 
@@ -1173,34 +1027,39 @@ async def idle_talker(bot: Bot):
         if idle_current_hour != hour:
             idle_hourly_count = 0
             idle_current_hour = hour
+            logger.info(f"[코인이형 idle] {hour}시 카운터 초기화")
 
         # 3번 채웠으면 침묵
         if idle_hourly_count >= 3:
+            logger.info(f"[코인이형 idle] {hour}시 3번 완료 → 침묵")
             continue
 
-        silent_min = (now_kst() - last_msg_time).total_seconds() // 60
-        if silent_min >= IDLE_THRESHOLD_MINUTES:
-            try:
-                response = await get_openai_client().chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": IDLE_PERSONA_PROMPT},
-                        {"role": "user",   "content": f"소통방이 {silent_min:.0f}분째 조용해. 자연스럽게 먼저 말 걸어줘"},
-                    ],
-                    max_tokens=80,
-                    temperature=1.0,
-                )
-                msg = response.choices[0].message.content.strip()
-                await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
-                last_msg_time = now_kst()
-                idle_hourly_count += 1
-                logger.info(f"코인이형 먼저 말 걸기 완료 ({hour}시 {idle_hourly_count}/3번)")
-            except Exception as e:
-                logger.error(f"idle 오류: {e}")
+        # DB에서 실제 마지막 채팅 시간 조회
+        last_chat  = await get_last_chat_time()
+        silent_min = int((now_kst() - last_chat).total_seconds() // 60)
+
+        if silent_min < IDLE_THRESHOLD_MINUTES:
+            continue
+
+        try:
+            response = await get_openai_client().chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": IDLE_PERSONA_PROMPT},
+                    {"role": "user", "content": f"소통방이 {silent_min}분째 조용해. 자연스럽게 먼저 말 걸어줘"},
+                ],
+                max_tokens=80, temperature=1.0,
+            )
+            msg = response.choices[0].message.content.strip()
+            await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
+            await save_member(0, "코인이형", msg)
+
+            idle_hourly_count += 1
+            logger.info(f"[코인이형 idle] 말 걸기 완료 ({hour}시 {idle_hourly_count}/3번)")
+        except Exception as e:
+            logger.error(f"idle 오류: {e}")
 
 async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global last_msg_time
-
     message = update.message
     if not message or not message.text:
         return
@@ -1217,7 +1076,6 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if (hour == 23 and minute >= 30) or (hour == 0) or (1 <= hour < 8):
         return
 
-    last_msg_time = now_kst()
     user_text = message.text.strip()
     user_name = message.from_user.first_name or "회원"
 
@@ -1225,23 +1083,17 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_history.append({"role": "user", "content": f"{user_name}: {user_text}"})
 
     await asyncio.sleep(random.uniform(7, 15))
-
     if random.random() < 0.10:
         return
-
     await asyncio.sleep(random.uniform(7, 15))
 
     if await is_answered(message.message_id):
         return
-
     if not await claim_message(message.message_id, "코인이형"):
         return
 
     try:
-        await context.bot.send_chat_action(
-            chat_id=message.chat_id,
-            action=ChatAction.TYPING
-        )
+        await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
         await asyncio.sleep(random.uniform(1, 2))
 
         member = await get_member(message.from_user.id)
@@ -1262,13 +1114,9 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages.extend(list(chat_history))
 
         response = await get_openai_client().chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            max_tokens=60,
-            temperature=0.9,
+            model="gpt-4o-mini", messages=messages, max_tokens=60, temperature=0.9,
         )
         reply_text = response.choices[0].message.content.strip()
-
         chat_history.append({"role": "assistant", "content": reply_text})
         await save_member(0, "코인이형", reply_text)
 
@@ -1276,10 +1124,7 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(k in user_text.upper() for k in coin_keywords):
             await update_member_coins(message.from_user.id, user_text[:100])
 
-        await context.bot.send_message(
-            chat_id=message.chat_id,
-            text=reply_text
-        )
+        await context.bot.send_message(chat_id=message.chat_id, text=reply_text)
 
     except Exception as e:
         logger.error(f"AI 답변 오류: {e}")
@@ -1300,7 +1145,6 @@ async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYP
     minute = now_dt.minute
     if (hour == 23 and minute >= 30) or (hour == 0) or (1 <= hour < 8):
         return
-
     if random.random() > 0.25:
         return
 
@@ -1308,32 +1152,24 @@ async def bot_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYP
     await asyncio.sleep(random.uniform(10, 25))
 
     try:
-        await context.bot.send_chat_action(
-            chat_id=message.chat_id,
-            action=ChatAction.TYPING
-        )
+        await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
         await asyncio.sleep(random.uniform(1, 2))
 
         recent_logs = await get_recent_chat_logs(20)
         db_context = "\n".join([f"{r['name']}: {r['message']}" for r in recent_logs])
-
         bot_reaction_prompt = PERSONA_PROMPT + "\n\n[지금 상황]\n소통방에서 다른 멤버가 방금 말했어\n자연스럽게 끼어들거나 공감하거나 살짝 태클 걸어\n아주 짧게 1줄로만"
         if db_context:
             bot_reaction_prompt += f"\n[최근 대화]\n{db_context}"
 
         response = await get_openai_client().chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": bot_reaction_prompt},
-                {"role": "user", "content": f"방금 소통방에서 이런 말이 나왔어: {user_text}"},
-            ],
-            max_tokens=80,
-            temperature=0.95,
+            messages=[{"role": "system", "content": bot_reaction_prompt},
+                      {"role": "user", "content": f"방금 소통방에서 이런 말이 나왔어: {user_text}"}],
+            max_tokens=80, temperature=0.95,
         )
         reply = response.choices[0].message.content.strip()
         await save_member(0, "코인이형", reply)
         await context.bot.send_message(chat_id=message.chat_id, text=reply)
-
     except Exception as e:
         logger.error(f"봇 반응 오류: {e}")
 

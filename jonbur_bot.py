@@ -5,10 +5,6 @@
 """
 
 import os, asyncio, logging, random, asyncpg
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from matplotlib import font_manager
 from collections import deque
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -23,27 +19,6 @@ def now_kst():
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ── 한글 폰트 설정 ──────────────────────────────
-def setup_korean_font():
-    candidates = [
-        '/usr/share/fonts/truetype/nanum/NanumGothic.ttf',
-        '/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf',
-        '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-        '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf',
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            font_manager.fontManager.addfont(path)
-            prop = font_manager.FontProperties(fname=path)
-            plt.rcParams['font.family'] = prop.get_name()
-            plt.rcParams['axes.unicode_minus'] = False
-            logger.info(f"한글 폰트 적용: {prop.get_name()}")
-            return
-    plt.rcParams['axes.unicode_minus'] = False
-    logger.warning("한글 폰트 없음 — 기본 폰트 사용")
-
-setup_korean_font()
 
 JONGBUR_BOT_TOKEN = os.environ.get("JONGBUR_BOT_TOKEN")
 OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY")
@@ -143,16 +118,11 @@ async def get_db_pool():
     return _db_pool
 
 async def get_last_chat_time():
-    """
-    DB에서 실제 마지막 메시지 시간 조회
-    → 봇이 잠든 사이 온 메시지도 정확히 감지
-    """
+    """DB에서 실제 마지막 메시지 시간 조회 (봇이 잠든 사이 메시지도 정확히 감지)"""
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT created_at FROM chat_logs ORDER BY created_at DESC LIMIT 1"
-            )
+            row = await conn.fetchrow("SELECT created_at FROM chat_logs ORDER BY created_at DESC LIMIT 1")
         if row and row['created_at']:
             dt = row['created_at']
             if dt.tzinfo is None:
@@ -168,8 +138,7 @@ async def claim_message(message_id: int, bot_name: str) -> bool:
         async with pool.acquire() as conn:
             result = await conn.execute("""
                 INSERT INTO answered_messages (message_id, bot_name)
-                VALUES ($1, $2)
-                ON CONFLICT (message_id) DO NOTHING
+                VALUES ($1, $2) ON CONFLICT (message_id) DO NOTHING
             """, message_id, bot_name)
             return result == "INSERT 0 1"
     except Exception as e:
@@ -180,9 +149,7 @@ async def is_answered(message_id: int) -> bool:
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT 1 FROM answered_messages WHERE message_id = $1", message_id
-            )
+            row = await conn.fetchrow("SELECT 1 FROM answered_messages WHERE message_id = $1", message_id)
         return row is not None
     except:
         return False
@@ -196,10 +163,7 @@ async def save_log(user_id: int, name: str, message: str):
                 VALUES ($1, $2, NOW())
                 ON CONFLICT (user_id) DO UPDATE SET name=EXCLUDED.name, last_seen=NOW()
             """, user_id, name)
-            await conn.execute(
-                "INSERT INTO chat_logs (user_id, name, message) VALUES ($1, $2, $3)",
-                user_id, name, message
-            )
+            await conn.execute("INSERT INTO chat_logs (user_id, name, message) VALUES ($1, $2, $3)", user_id, name, message)
     except Exception as e:
         logger.error(f"DB 오류: {e}")
 
@@ -270,10 +234,11 @@ async def sleep_wake_scheduler(bot: Bot):
 
 async def idle_talker(bot: Bot):
     """
-    핵심 수정:
+    ★ 핵심 수정:
     - DB chat_logs에서 실제 마지막 메시지 시간 조회
-    - 봇이 잠든 사이 회원 메시지도 정확히 감지
-    - 1시간에 최대 3번 발화 후 침묵
+    - 봇이 잠든 사이 온 메시지도 정확히 감지
+    - 시간(hour) 바뀌면 카운터 초기화
+    - 시간당 최대 3번 발화 후 완전 침묵
     """
     global idle_hourly_count, idle_current_hour
 
@@ -296,17 +261,17 @@ async def idle_talker(bot: Bot):
             idle_current_hour = hour
             logger.info(f"[존버 idle] {hour}시 카운터 초기화")
 
-        # 3번 다 했으면 침묵
+        # 3번 채웠으면 침묵
         if idle_hourly_count >= 3:
-            logger.info(f"[존버 idle] {hour}시 발화 한도(3번) 도달 → 대기")
+            logger.info(f"[존버 idle] {hour}시 3번 완료 → 침묵")
             continue
 
-        # ★ DB에서 실제 마지막 채팅 시간 가져오기
+        # DB에서 실제 마지막 채팅 시간 조회
         last_chat  = await get_last_chat_time()
         silent_min = int((now_kst() - last_chat).total_seconds() // 60)
 
         if silent_min < 60:
-            logger.info(f"[존버 idle] 조용하지 않음 ({silent_min}분 경과) → 패스")
+            logger.info(f"[존버 idle] 조용하지 않음 ({silent_min}분) → 패스")
             continue
 
         # 조건 충족 → 말 걸기
@@ -315,21 +280,13 @@ async def idle_talker(bot: Bot):
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": IDLE_MSG_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"소통방이 {silent_min}분째 조용해. "
-                            f"이번 시간에 이미 {idle_hourly_count}번 말했어. "
-                            "자연스럽게 먼저 말 걸어줘"
-                        ),
-                    },
+                    {"role": "user", "content": f"소통방이 {silent_min}분째 조용해. 이번 시간에 이미 {idle_hourly_count}번 말했어. 자연스럽게 먼저 말 걸어줘"},
                 ],
-                max_tokens=80,
-                temperature=1.0,
+                max_tokens=80, temperature=1.0,
             )
             msg = r.choices[0].message.content.strip()
             await bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
-            await save_log(0, "존버킴", msg)  # DB에도 기록 → 다른 봇도 감지 가능
+            await save_log(0, "존버킴", msg)  # DB 기록 → 다른 봇도 감지 가능
 
             idle_hourly_count += 1
             logger.info(f"[존버 idle] 말 걸기 완료 ({hour}시 {idle_hourly_count}/3번)")
@@ -359,7 +316,6 @@ async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = message.text.strip()
     user_name = message.from_user.first_name or "회원"
 
-    # ★ 메시지마다 DB 저장 (idle_talker 정확히 감지하도록)
     await save_log(message.from_user.id, user_name, user_text)
     chat_history.append({"role": "user", "content": f"{user_name}: {user_text}"})
 
